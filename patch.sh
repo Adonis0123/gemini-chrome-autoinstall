@@ -83,6 +83,10 @@ run_core_install() {
 cmd_enable() {
     mkdir -p "$LAUNCH_AGENTS_DIR"
 
+    # Unload existing agents first (idempotent re-install)
+    launchctl unload "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" 2>/dev/null || true
+    launchctl unload "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST" 2>/dev/null || true
+
     cat > "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

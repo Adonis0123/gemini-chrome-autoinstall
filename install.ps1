@@ -8,6 +8,10 @@ $InstallDir = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall"
 Write-Host "Installing gemini-chrome-autoinstall..."
 Write-Host ""
 
+# Clean up stale locks from previous installs
+$ActiveLock = Join-Path $env:TEMP "gemini-chrome-autoinstall.active.lock"
+if (Test-Path $ActiveLock) { Remove-Item -Path $ActiveLock -Force -Recurse -ErrorAction SilentlyContinue }
+
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 $downloadParams = @{
     Uri = "$RawBase/patch.ps1"

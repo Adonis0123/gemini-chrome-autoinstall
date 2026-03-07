@@ -9,6 +9,9 @@ INSTALL_DIR="$HOME/.gemini-chrome-autoinstall"
 echo "Installing gemini-chrome-autoinstall..."
 echo ""
 
+# Clean up stale locks from previous installs
+rmdir /tmp/gemini-chrome-autoinstall.active.lock 2>/dev/null || true
+
 mkdir -p "$INSTALL_DIR"
 curl -fsSL "$RAW_BASE/patch.sh" -o "$INSTALL_DIR/patch.sh"
 chmod +x "$INSTALL_DIR/patch.sh"

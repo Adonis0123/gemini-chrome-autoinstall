@@ -112,30 +112,34 @@ irm https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1 
 
 ## Quick Shortcuts
 
-### macOS: add a zsh command
+### macOS: add zsh commands
 
 Add this to `~/.zshrc`:
 
 ```bash
 alias gemini-chrome-fix='$HOME/.gemini-chrome-autoinstall/patch.sh manual'
+alias gemini-chrome-status='$HOME/.gemini-chrome-autoinstall/patch.sh status'
 ```
 
 Then reload zsh:
 
 ```bash
 source ~/.zshrc
-gemini-chrome-fix
+gemini-chrome-fix       # Re-install the extension
+gemini-chrome-status    # Check current status
 ```
 
-### Windows: add a PowerShell shortcut command
+### Windows: add PowerShell shortcut commands
 
-Add a helper function to your PowerShell profile:
+Add helper functions to your PowerShell profile:
 
 ```powershell
 if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
 Add-Content $PROFILE 'function gemini-chrome-fix { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual }'
+Add-Content $PROFILE 'function gemini-chrome-status { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status }'
 . $PROFILE
-gemini-chrome-fix
+gemini-chrome-fix       # Re-install the extension
+gemini-chrome-status    # Check current status
 ```
 
 ## Logs

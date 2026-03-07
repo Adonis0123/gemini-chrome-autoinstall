@@ -188,6 +188,12 @@ cmd_status() {
         echo "  Watcher plist: NOT INSTALLED"
     fi
 
+    if [ -d "$ACTIVE_LOCK_DIR" ]; then
+        echo "  Running:       YES (patch is currently in progress)"
+    else
+        echo "  Running:       no"
+    fi
+
     if [ -f "$COOLDOWN_FILE" ]; then
         local lock_time
         lock_time=$(stat -f %m "$COOLDOWN_FILE" 2>/dev/null || echo 0)

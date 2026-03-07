@@ -128,6 +128,13 @@ function Invoke-Status {
         Write-Host "  Task:    NOT REGISTERED"
     }
 
+    if (Test-Path $ActiveLockDir) {
+        Write-Host "  Running: YES (patch is currently in progress)"
+    }
+    else {
+        Write-Host "  Running: no"
+    }
+
     if (Test-Path $LockFile) {
         $lockTime = (Get-Item $LockFile).LastWriteTime
         $age = [int](New-TimeSpan -Start $lockTime -End (Get-Date)).TotalSeconds

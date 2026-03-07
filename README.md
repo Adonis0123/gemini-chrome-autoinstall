@@ -1,6 +1,6 @@
 # Gemini Chrome AutoInstall
 
-Every time Chrome updates, the [Gemini-in-Chrome](https://github.com/nicepkg/Gemini-in-Chrome) extension gets removed. This tool brings it back automatically — set it once, forget it forever.
+When Chrome updates and removes the [Gemini-in-Chrome](https://github.com/appsail/Gemini-in-Chrome) extension, this tool helps you bring it back with one command. On macOS it can also watch the Chrome app and auto-reinstall in the background; on Windows it auto-checks at logon and also gives you a fast manual recovery command for same-session updates.
 
 ## Install
 
@@ -16,7 +16,10 @@ curl -fsSL https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstal
 irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/main/install.ps1 | iex
 ```
 
-Done. It will run automatically in the background from now on.
+Done.
+
+- **macOS**: it will keep watching Chrome updates in the background.
+- **Windows**: it will auto-run at logon. If Chrome updates during an already-open session, run the manual fix command below after you close Chrome.
 
 ## Uninstall
 
@@ -47,10 +50,13 @@ When triggered, the script waits for Chrome to close, then re-installs the exten
 
 A Scheduled Task runs at logon. It waits for Chrome to close, then re-installs the extension.
 
+This is intentional: Windows does **not** watch every Chrome update event in real time. If Chrome updates during a session that is already open, just close Chrome and run the manual fix command below.
+
 ### Safety
 
 - Waits for Chrome to close before patching (up to 10 min)
 - Lock file prevents repeated runs within 5 minutes
+- Manual fix command is available on both platforms when you want to re-install immediately
 
 ## Commands
 
@@ -60,6 +66,7 @@ You can run these manually after installation:
 # macOS
 ~/.gemini-chrome-autoinstall/patch.sh status     # Check if it's running
 ~/.gemini-chrome-autoinstall/patch.sh run         # Patch now (waits for Chrome to close)
+~/.gemini-chrome-autoinstall/patch.sh manual      # Re-install now after Chrome is closed
 ~/.gemini-chrome-autoinstall/patch.sh disable     # Stop auto-patching (keep files)
 ~/.gemini-chrome-autoinstall/patch.sh enable      # Re-enable auto-patching
 ~/.gemini-chrome-autoinstall/patch.sh uninstall   # Remove everything
@@ -69,9 +76,66 @@ You can run these manually after installation:
 # Windows (PowerShell as Administrator)
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" run
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" disable
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" enable
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
+```
+
+## Manual Fix
+
+If you already closed Chrome and want to run the core installer right now:
+
+**macOS**
+
+```bash
+~/.gemini-chrome-autoinstall/patch.sh manual
+```
+
+This runs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh | bash
+```
+
+**Windows**
+
+```powershell
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual
+```
+
+This runs:
+
+```powershell
+irm https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1 | iex
+```
+
+## Quick Shortcuts
+
+### macOS: add a zsh command
+
+Add this to `~/.zshrc`:
+
+```bash
+alias gemini-chrome-fix='$HOME/.gemini-chrome-autoinstall/patch.sh manual'
+```
+
+Then reload zsh:
+
+```bash
+source ~/.zshrc
+gemini-chrome-fix
+```
+
+### Windows: add a PowerShell shortcut command
+
+Add a helper function to your PowerShell profile:
+
+```powershell
+if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+Add-Content $PROFILE 'function gemini-chrome-fix { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual }'
+. $PROFILE
+gemini-chrome-fix
 ```
 
 ## Logs

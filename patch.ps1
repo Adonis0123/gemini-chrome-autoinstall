@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("enable", "disable", "uninstall", "status", "run", "help")]
+    [ValidateSet("enable", "disable", "uninstall", "status", "run", "manual", "help")]
     [string]$Command = "help"
 )
 
@@ -9,9 +9,11 @@ $TaskName = "GeminiChromeAutoPatch"
 $ScriptPath = $PSScriptRoot
 $LogFile = Join-Path $env:LOCALAPPDATA "gemini-chrome-autoinstall.log"
 $LockFile = Join-Path $env:TEMP "gemini-chrome-autoinstall.lock"
+$ActiveLockDir = Join-Path $env:TEMP "gemini-chrome-autoinstall.active.lock"
 $LockTimeout = 300   # 5 minutes
 $WaitInterval = 5    # seconds
 $MaxWait = 600       # 10 minutes
+$CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
 
 function Write-Log {
     param([string]$Message)
@@ -19,6 +21,63 @@ function Write-Log {
     $line = "[$timestamp] $Message"
     Write-Host $line
     Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
+}
+
+function Test-Cooldown {
+    if (Test-Path $LockFile) {
+        $lockTime = (Get-Item $LockFile).LastWriteTime
+        $age = [int](New-TimeSpan -Start $lockTime -End (Get-Date)).TotalSeconds
+        if ($age -lt $LockTimeout) {
+            Write-Log "Skipped: last run was ${age}s ago (< ${LockTimeout}s)."
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Enter-ActiveLock {
+    try {
+        New-Item -Path $ActiveLockDir -ItemType Directory -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        Write-Log "Skipped: another run is already in progress."
+        Write-Host "Another run is already in progress."
+        return $false
+    }
+}
+
+function Exit-ActiveLock {
+    Remove-Item -Path $ActiveLockDir -Force -Recurse -ErrorAction SilentlyContinue
+}
+
+function Wait-ForChromeToExit {
+    $waited = 0
+    while (Get-Process chrome -ErrorAction SilentlyContinue) {
+        if ($waited -ge $MaxWait) {
+            Write-Log "Timeout: Chrome still running after ${MaxWait}s. Aborting."
+            return $false
+        }
+        Write-Log "Chrome is running. Waiting... (${waited}s / ${MaxWait}s)"
+        Start-Sleep -Seconds $WaitInterval
+        $waited += $WaitInterval
+    }
+
+    return $true
+}
+
+function Invoke-CoreInstall {
+    Write-Log "Chrome is closed. Running Gemini-in-Chrome install script..."
+    try {
+        Invoke-RestMethod -Uri $CoreInstallUrl | Invoke-Expression
+        Write-Log "Install completed successfully."
+        return $true
+    }
+    catch {
+        Write-Log "Install failed: $_"
+        return $false
+    }
 }
 
 function Invoke-Enable {
@@ -82,6 +141,7 @@ function Invoke-Status {
 function Invoke-Uninstall {
     Invoke-Disable
     Remove-Item -Path $LockFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $ActiveLockDir -Force -Recurse -ErrorAction SilentlyContinue
     $installDir = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall"
     if (Test-Path $installDir) {
         Remove-Item -Path $installDir -Recurse -Force
@@ -93,39 +153,46 @@ function Invoke-Uninstall {
 function Invoke-Run {
     Write-Log "Run triggered."
 
-    # Dedup: skip if lock file exists and is less than 5 minutes old
-    if (Test-Path $LockFile) {
-        $lockTime = (Get-Item $LockFile).LastWriteTime
-        $age = [int](New-TimeSpan -Start $lockTime -End (Get-Date)).TotalSeconds
-        if ($age -lt $LockTimeout) {
-            Write-Log "Skipped: last run was ${age}s ago (< ${LockTimeout}s)."
-            return
-        }
+    if (-not (Test-Cooldown)) {
+        return
     }
 
-    # Wait for Chrome to close
-    $waited = 0
-    while (Get-Process chrome -ErrorAction SilentlyContinue) {
-        if ($waited -ge $MaxWait) {
-            Write-Log "Timeout: Chrome still running after ${MaxWait}s. Aborting."
-            return
-        }
-        Write-Log "Chrome is running. Waiting... (${waited}s / ${MaxWait}s)"
-        Start-Sleep -Seconds $WaitInterval
-        $waited += $WaitInterval
+    if (-not (Enter-ActiveLock)) {
+        return
     }
 
-    # Create lock file
-    New-Item -Path $LockFile -ItemType File -Force | Out-Null
-
-    # Execute the install script
-    Write-Log "Chrome is closed. Running Gemini-in-Chrome install script..."
     try {
-        Invoke-RestMethod https://raw.githubusercontent.com/nicepkg/Gemini-in-Chrome/main/install.ps1 | Invoke-Expression
-        Write-Log "Install completed successfully."
+        if (-not (Wait-ForChromeToExit)) {
+            return
+        }
+
+        New-Item -Path $LockFile -ItemType File -Force | Out-Null
+        [void](Invoke-CoreInstall)
     }
-    catch {
-        Write-Log "Install failed: $_"
+    finally {
+        Exit-ActiveLock
+    }
+}
+
+function Invoke-Manual {
+    Write-Log "Manual install triggered."
+
+    if (Get-Process chrome -ErrorAction SilentlyContinue) {
+        Write-Log "Skipped: Chrome is still running. Close it first, then rerun 'manual'."
+        Write-Host "Chrome is still running. Close it first, then rerun: & `"$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1`" manual"
+        return
+    }
+
+    if (-not (Enter-ActiveLock)) {
+        return
+    }
+
+    try {
+        New-Item -Path $LockFile -ItemType File -Force | Out-Null
+        [void](Invoke-CoreInstall)
+    }
+    finally {
+        Exit-ActiveLock
     }
 }
 
@@ -135,8 +202,9 @@ switch ($Command) {
     "uninstall" { Invoke-Uninstall }
     "status"    { Invoke-Status }
     "run"       { Invoke-Run }
+    "manual"    { Invoke-Manual }
     default {
-        Write-Host "Usage: .\patch.ps1 {enable|disable|uninstall|status|run}"
+        Write-Host "Usage: .\patch.ps1 {enable|disable|uninstall|status|run|manual}"
         Write-Host ""
         Write-Host "Commands:"
         Write-Host "  enable      Register scheduled task for auto-patching"
@@ -144,5 +212,6 @@ switch ($Command) {
         Write-Host "  uninstall   Disable and remove all installed files"
         Write-Host "  status      Show current status"
         Write-Host "  run         Execute the patch (waits for Chrome to close)"
+        Write-Host "  manual      Re-install immediately after you close Chrome"
     }
 }

@@ -21,4 +21,6 @@ echo "The extension will be re-installed automatically after every Chrome update
 echo ""
 echo "Useful commands:"
 echo "  Check status:  ~/.gemini-chrome-autoinstall/patch.sh status"
+echo "  Manual fix:    ~/.gemini-chrome-autoinstall/patch.sh manual"
+echo "  Shortcut name: gemini-chrome-fix"
 echo "  Uninstall:     ~/.gemini-chrome-autoinstall/patch.sh uninstall"

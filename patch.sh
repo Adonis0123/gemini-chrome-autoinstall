@@ -7,14 +7,77 @@ BOOT_LABEL="com.gemini-chrome-autoinstall.boot"
 WATCHER_LABEL="com.gemini-chrome-autoinstall.watcher"
 BOOT_PLIST="$BOOT_LABEL.plist"
 WATCHER_PLIST="$WATCHER_LABEL.plist"
-LOCK_FILE="/tmp/gemini-chrome-autoinstall.lock"
+COOLDOWN_FILE="/tmp/gemini-chrome-autoinstall.lock"
+ACTIVE_LOCK_DIR="/tmp/gemini-chrome-autoinstall.active.lock"
 LOG_FILE="$HOME/Library/Logs/gemini-chrome-autoinstall.log"
 LOCK_TIMEOUT=300  # 5 minutes
 WAIT_INTERVAL=5   # seconds
 MAX_WAIT=600      # 10 minutes
+CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+check_cooldown() {
+    if [ -f "$COOLDOWN_FILE" ]; then
+        local lock_time
+        lock_time=$(stat -f %m "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+        local now
+        now=$(date +%s)
+        local age=$(( now - lock_time ))
+        if [ "$age" -lt "$LOCK_TIMEOUT" ]; then
+            log "Skipped: last run was ${age}s ago (< ${LOCK_TIMEOUT}s)."
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+acquire_active_lock() {
+    if mkdir "$ACTIVE_LOCK_DIR" 2>/dev/null; then
+        return 0
+    fi
+
+    log "Skipped: another run is already in progress."
+    echo "Another run is already in progress."
+    return 1
+}
+
+release_active_lock() {
+    rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || true
+}
+
+arm_active_lock_cleanup() {
+    trap 'release_active_lock' EXIT
+}
+
+disarm_active_lock_cleanup() {
+    trap - EXIT
+}
+
+wait_for_chrome_to_close() {
+    local waited=0
+    while pgrep -x "Google Chrome" >/dev/null 2>&1; do
+        if [ "$waited" -ge "$MAX_WAIT" ]; then
+            log "Timeout: Chrome still running after ${MAX_WAIT}s. Aborting."
+            return 1
+        fi
+        log "Chrome is running. Waiting... (${waited}s / ${MAX_WAIT}s)"
+        sleep "$WAIT_INTERVAL"
+        waited=$(( waited + WAIT_INTERVAL ))
+    done
+}
+
+run_core_install() {
+    log "Chrome is closed. Running Gemini-in-Chrome install script..."
+    if curl -fsSL "$CORE_INSTALL_URL" | bash; then
+        log "Install completed successfully."
+    else
+        log "Install failed with exit code $?."
+        return 1
+    fi
 }
 
 cmd_enable() {
@@ -125,9 +188,9 @@ cmd_status() {
         echo "  Watcher plist: NOT INSTALLED"
     fi
 
-    if [ -f "$LOCK_FILE" ]; then
+    if [ -f "$COOLDOWN_FILE" ]; then
         local lock_time
-        lock_time=$(stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0)
+        lock_time=$(stat -f %m "$COOLDOWN_FILE" 2>/dev/null || echo 0)
         local now
         now=$(date +%s)
         local age=$(( now - lock_time ))
@@ -139,7 +202,8 @@ cmd_status() {
 
 cmd_uninstall() {
     cmd_disable
-    rm -f "$LOCK_FILE"
+    rm -f "$COOLDOWN_FILE"
+    rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || true
     rm -rf "$HOME/.gemini-chrome-autoinstall"
     log "Uninstalled: all files removed."
     echo "Done. gemini-chrome-autoinstall has been completely removed."
@@ -148,42 +212,55 @@ cmd_uninstall() {
 cmd_run() {
     log "Run triggered."
 
-    # Dedup: skip if lock file exists and is less than 5 minutes old
-    if [ -f "$LOCK_FILE" ]; then
-        local lock_time
-        lock_time=$(stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0)
-        local now
-        now=$(date +%s)
-        local age=$(( now - lock_time ))
-        if [ "$age" -lt "$LOCK_TIMEOUT" ]; then
-            log "Skipped: last run was ${age}s ago (< ${LOCK_TIMEOUT}s)."
-            return 0
+    if ! check_cooldown; then
+        return 0
+    fi
+
+    if ! acquire_active_lock; then
+        return 0
+    fi
+
+    arm_active_lock_cleanup
+
+    local status=0
+    if ! wait_for_chrome_to_close; then
+        status=1
+    else
+        touch "$COOLDOWN_FILE"
+        if ! run_core_install; then
+            status=1
         fi
     fi
 
-    # Wait for Chrome to close
-    local waited=0
-    while pgrep -x "Google Chrome" >/dev/null 2>&1; do
-        if [ "$waited" -ge "$MAX_WAIT" ]; then
-            log "Timeout: Chrome still running after ${MAX_WAIT}s. Aborting."
-            return 1
-        fi
-        log "Chrome is running. Waiting... (${waited}s / ${MAX_WAIT}s)"
-        sleep "$WAIT_INTERVAL"
-        waited=$(( waited + WAIT_INTERVAL ))
-    done
+    disarm_active_lock_cleanup
+    release_active_lock
+    return $status
+}
 
-    # Create lock file
-    touch "$LOCK_FILE"
+cmd_manual() {
+    log "Manual install triggered."
 
-    # Execute the install script
-    log "Chrome is closed. Running Gemini-in-Chrome install script..."
-    if curl -fsSL https://raw.githubusercontent.com/nicepkg/Gemini-in-Chrome/main/install.sh | bash; then
-        log "Install completed successfully."
-    else
-        log "Install failed with exit code $?."
+    if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+        log "Skipped: Chrome is still running. Close it first, then rerun 'manual'."
+        echo "Chrome is still running. Close it first, then rerun: ~/.gemini-chrome-autoinstall/patch.sh manual"
         return 1
     fi
+
+    if ! acquire_active_lock; then
+        return 0
+    fi
+
+    arm_active_lock_cleanup
+
+    touch "$COOLDOWN_FILE"
+    local status=0
+    if ! run_core_install; then
+        status=1
+    fi
+
+    disarm_active_lock_cleanup
+    release_active_lock
+    return $status
 }
 
 # Main
@@ -193,8 +270,9 @@ case "${1:-help}" in
     uninstall) cmd_uninstall ;;
     status)    cmd_status ;;
     run)       cmd_run ;;
+    manual)    cmd_manual ;;
     *)
-        echo "Usage: $0 {enable|disable|uninstall|status|run}"
+        echo "Usage: $0 {enable|disable|uninstall|status|run|manual}"
         echo ""
         echo "Commands:"
         echo "  enable      Install and load LaunchAgents"
@@ -202,6 +280,7 @@ case "${1:-help}" in
         echo "  uninstall   Disable and remove all installed files"
         echo "  status      Show current status"
         echo "  run         Execute the patch (waits for Chrome to close)"
+        echo "  manual      Re-install immediately after you close Chrome"
         exit 1
         ;;
 esac

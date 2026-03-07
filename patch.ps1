@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("enable", "disable", "status", "run", "help")]
+    [ValidateSet("enable", "disable", "uninstall", "status", "run", "help")]
     [string]$Command = "help"
 )
 
@@ -79,6 +79,17 @@ function Invoke-Status {
     }
 }
 
+function Invoke-Uninstall {
+    Invoke-Disable
+    Remove-Item -Path $LockFile -Force -ErrorAction SilentlyContinue
+    $installDir = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall"
+    if (Test-Path $installDir) {
+        Remove-Item -Path $installDir -Recurse -Force
+    }
+    Write-Log "Uninstalled: all files removed."
+    Write-Host "Done. gemini-chrome-autoinstall has been completely removed."
+}
+
 function Invoke-Run {
     Write-Log "Run triggered."
 
@@ -119,17 +130,19 @@ function Invoke-Run {
 }
 
 switch ($Command) {
-    "enable"  { Invoke-Enable }
-    "disable" { Invoke-Disable }
-    "status"  { Invoke-Status }
-    "run"     { Invoke-Run }
+    "enable"    { Invoke-Enable }
+    "disable"   { Invoke-Disable }
+    "uninstall" { Invoke-Uninstall }
+    "status"    { Invoke-Status }
+    "run"       { Invoke-Run }
     default {
-        Write-Host "Usage: .\patch.ps1 {enable|disable|status|run}"
+        Write-Host "Usage: .\patch.ps1 {enable|disable|uninstall|status|run}"
         Write-Host ""
         Write-Host "Commands:"
-        Write-Host "  enable   Register scheduled task for auto-patching"
-        Write-Host "  disable  Remove scheduled task"
-        Write-Host "  status   Show current status"
-        Write-Host "  run      Execute the patch (waits for Chrome to close)"
+        Write-Host "  enable      Register scheduled task for auto-patching"
+        Write-Host "  disable     Remove scheduled task"
+        Write-Host "  uninstall   Disable and remove all installed files"
+        Write-Host "  status      Show current status"
+        Write-Host "  run         Execute the patch (waits for Chrome to close)"
     }
 }

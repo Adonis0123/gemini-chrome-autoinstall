@@ -137,6 +137,14 @@ cmd_status() {
     fi
 }
 
+cmd_uninstall() {
+    cmd_disable
+    rm -f "$LOCK_FILE"
+    rm -rf "$HOME/.gemini-chrome-autoinstall"
+    log "Uninstalled: all files removed."
+    echo "Done. gemini-chrome-autoinstall has been completely removed."
+}
+
 cmd_run() {
     log "Run triggered."
 
@@ -180,18 +188,20 @@ cmd_run() {
 
 # Main
 case "${1:-help}" in
-    enable)  cmd_enable ;;
-    disable) cmd_disable ;;
-    status)  cmd_status ;;
-    run)     cmd_run ;;
+    enable)    cmd_enable ;;
+    disable)   cmd_disable ;;
+    uninstall) cmd_uninstall ;;
+    status)    cmd_status ;;
+    run)       cmd_run ;;
     *)
-        echo "Usage: $0 {enable|disable|status|run}"
+        echo "Usage: $0 {enable|disable|uninstall|status|run}"
         echo ""
         echo "Commands:"
-        echo "  enable   Install and load LaunchAgents"
-        echo "  disable  Unload and remove LaunchAgents"
-        echo "  status   Show current status"
-        echo "  run      Execute the patch (waits for Chrome to close)"
+        echo "  enable      Install and load LaunchAgents"
+        echo "  disable     Unload and remove LaunchAgents"
+        echo "  uninstall   Disable and remove all installed files"
+        echo "  status      Show current status"
+        echo "  run         Execute the patch (waits for Chrome to close)"
         exit 1
         ;;
 esac

@@ -1,86 +1,83 @@
 # Gemini Chrome AutoInstall
 
-Automatically re-install the [Gemini-in-Chrome](https://github.com/nicepkg/Gemini-in-Chrome) extension after Chrome updates, so you never lose it.
+Every time Chrome updates, the [Gemini-in-Chrome](https://github.com/nicepkg/Gemini-in-Chrome) extension gets removed. This tool brings it back automatically — set it once, forget it forever.
 
-## Features
+## Install
 
-- **Auto-patch on boot** — runs the install script once after every login
-- **Auto-patch on update** (macOS) — watches Chrome's `Info.plist` for changes and triggers a reinstall
-- **Safe execution** — waits for Chrome to close before patching; times out after 10 minutes
-- **Deduplication** — lock file prevents repeated runs within 5 minutes
-- **Cross-platform** — macOS (LaunchAgents) and Windows (Scheduled Tasks)
-
-## Quick Start
-
-### macOS
+**macOS** — open Terminal and run:
 
 ```bash
-git clone https://github.com/<your-username>/gemini-chrome-autoinstall.git
-cd gemini-chrome-autoinstall
-chmod +x patch.sh
-
-# Enable auto-patching
-./patch.sh enable
-
-# Check status
-./patch.sh status
-
-# Run manually (waits for Chrome to close)
-./patch.sh run
-
-# Disable auto-patching
-./patch.sh disable
+curl -fsSL https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/main/install.sh | bash
 ```
 
-### Windows (PowerShell as Administrator)
+**Windows** — open PowerShell **as Administrator** and run:
 
 ```powershell
-git clone https://github.com/<your-username>/gemini-chrome-autoinstall.git
-cd gemini-chrome-autoinstall
+irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/main/install.ps1 | iex
+```
 
-# Enable auto-patching
-.\patch.ps1 enable
+Done. It will run automatically in the background from now on.
 
-# Check status
-.\patch.ps1 status
+## Uninstall
 
-# Run manually
-.\patch.ps1 run
+**macOS:**
 
-# Disable auto-patching
-.\patch.ps1 disable
+```bash
+~/.gemini-chrome-autoinstall/patch.sh uninstall
+```
+
+**Windows** (PowerShell as Administrator):
+
+```powershell
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
 ```
 
 ## How It Works
 
 ### macOS
 
-Two LaunchAgents are dynamically generated and loaded into `~/Library/LaunchAgents/`:
+Two background agents are registered:
 
-| Agent | Trigger | Purpose |
-|-------|---------|---------|
-| `com.gemini-chrome-autoinstall.boot` | Login (`RunAtLoad`) | Patch once after every boot |
-| `com.gemini-chrome-autoinstall.watcher` | Chrome `Info.plist` change | Patch after Chrome updates |
+- **Boot agent** — runs once after every login
+- **Watcher agent** — detects Chrome updates by watching `/Applications/Google Chrome.app/Contents/Info.plist`
 
-Both agents call `patch.sh run`, which waits for Chrome to close, then downloads and executes the upstream install script.
+When triggered, the script waits for Chrome to close, then re-installs the extension.
 
 ### Windows
 
-A Scheduled Task (`GeminiChromeAutoPatch`) is registered to run at logon. It calls `patch.ps1 run` with the same wait-and-patch logic.
+A Scheduled Task runs at logon. It waits for Chrome to close, then re-installs the extension.
+
+### Safety
+
+- Waits for Chrome to close before patching (up to 10 min)
+- Lock file prevents repeated runs within 5 minutes
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `enable` | Install and load LaunchAgents (macOS) / register Scheduled Task (Windows) |
-| `disable` | Unload and remove LaunchAgents / unregister Scheduled Task |
-| `status` | Show current agent/task status and last run time |
-| `run` | Execute the patch immediately (waits for Chrome to close) |
+You can run these manually after installation:
+
+```bash
+# macOS
+~/.gemini-chrome-autoinstall/patch.sh status     # Check if it's running
+~/.gemini-chrome-autoinstall/patch.sh run         # Patch now (waits for Chrome to close)
+~/.gemini-chrome-autoinstall/patch.sh disable     # Stop auto-patching (keep files)
+~/.gemini-chrome-autoinstall/patch.sh enable      # Re-enable auto-patching
+~/.gemini-chrome-autoinstall/patch.sh uninstall   # Remove everything
+```
+
+```powershell
+# Windows (PowerShell as Administrator)
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" run
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" disable
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" enable
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
+```
 
 ## Logs
 
-| Platform | Log path |
-|----------|----------|
+| Platform | Path |
+|----------|------|
 | macOS | `~/Library/Logs/gemini-chrome-autoinstall.log` |
 | Windows | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="Adonis0123/gemini-chrome-autoinstall"
-BRANCH="main"
+BRANCH="master"
 RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
 INSTALL_DIR="$HOME/.gemini-chrome-autoinstall"
 

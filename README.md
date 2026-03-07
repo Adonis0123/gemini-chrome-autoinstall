@@ -7,13 +7,13 @@ When Chrome updates and removes the [Gemini-in-Chrome](https://github.com/appsai
 **macOS** — open Terminal and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.sh | bash
 ```
 
 **Windows** — open PowerShell **as Administrator** and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.ps1 | iex
 ```
 
 Done.

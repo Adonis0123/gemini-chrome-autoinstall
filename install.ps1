@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Repo = "Adonis0123/gemini-chrome-autoinstall"
-$Branch = "main"
+$Branch = "master"
 $RawBase = "https://raw.githubusercontent.com/$Repo/$Branch"
 $InstallDir = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall"
 

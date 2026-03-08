@@ -10,7 +10,7 @@ When Chrome updates and removes the [Gemini-in-Chrome](https://github.com/appsai
 curl -fsSL https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.sh | bash
 ```
 
-**Windows** — open PowerShell **as Administrator** and run:
+**Windows** — open PowerShell and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.ps1 | iex
@@ -29,7 +29,7 @@ Done.
 ~/.gemini-chrome-autoinstall/patch.sh uninstall
 ```
 
-**Windows** (PowerShell as Administrator):
+**Windows:**
 
 ```powershell
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
@@ -48,7 +48,7 @@ When triggered, the script waits for Chrome to close, then re-installs the exten
 
 ### Windows
 
-A Scheduled Task runs at logon. It waits for Chrome to close, then re-installs the extension.
+A Scheduled Task runs at logon (registered under the current user, no Administrator privileges required). It waits for Chrome to close, then re-installs the extension.
 
 This is intentional: Windows does **not** watch every Chrome update event in real time. If Chrome updates during a session that is already open, just close Chrome and run the manual fix command below.
 
@@ -73,7 +73,7 @@ You can run these manually after installation:
 ```
 
 ```powershell
-# Windows (PowerShell as Administrator)
+# Windows
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" run
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual

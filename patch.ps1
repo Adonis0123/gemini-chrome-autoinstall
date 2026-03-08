@@ -94,11 +94,14 @@ function Invoke-Enable {
         -DontStopIfGoingOnBatteries `
         -StartWhenAvailable
 
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+
     Register-ScheduledTask `
         -TaskName $TaskName `
         -Action $action `
         -Trigger $triggerLogon `
         -Settings $settings `
+        -Principal $principal `
         -Description "Automatically re-install Gemini-in-Chrome extension after Chrome updates" `
         -Force | Out-Null
 

@@ -85,7 +85,7 @@ function Invoke-Enable {
 
     $action = New-ScheduledTaskAction `
         -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$patchScript`" run"
+        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$patchScript`" run"
 
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
 
@@ -131,6 +131,13 @@ function Invoke-Status {
         Write-Host "  Task:    NOT REGISTERED"
     }
 
+    if (Get-Process chrome -ErrorAction SilentlyContinue) {
+        Write-Host "  Chrome:  RUNNING"
+    }
+    else {
+        Write-Host "  Chrome:  not running"
+    }
+
     if (Test-Path $ActiveLockDir) {
         Write-Host "  Running: YES (patch is currently in progress)"
     }
@@ -146,6 +153,8 @@ function Invoke-Status {
     else {
         Write-Host "  Last run: never"
     }
+
+    Write-Host "  Log:     $LogFile"
 }
 
 function Invoke-Uninstall {

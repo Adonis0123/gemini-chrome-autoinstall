@@ -97,7 +97,8 @@ gemini-chrome-autoinstall/
 └── patch.ps1                                              # 控制脚本
 %LOCALAPPDATA%\
 └── gemini-chrome-autoinstall.log                          # 日志文件
-# Scheduled Task: "GeminiChromeAutoPatch"                  # 计划任务
+# Scheduled Task: "GeminiChromeAutoPatch"                  # 计划任务（-WindowStyle Hidden）
+# $PROFILE 中注册 gemini-chrome-fix / gemini-chrome-status 快捷函数
 ```
 
 ### 外部依赖
@@ -113,7 +114,7 @@ gemini-chrome-autoinstall/
 
 ### 职责
 
-一键完成所有安装工作：下载补丁脚本 → 注册自动任务 → 显示使用指南。
+一键完成所有安装工作：下载补丁脚本 → 注册自动任务 → 注册快捷函数（Windows）→ 显示使用指南。
 
 ### 幂等性设计
 
@@ -135,6 +136,11 @@ gemini-chrome-autoinstall/
 4. 调用 patch enable（内部也是幂等的）
    ├── macOS:  先 unload 再 load LaunchAgents
    └── Windows: Register-ScheduledTask -Force（覆盖注册）
+
+5. 注册 Profile 快捷函数（仅 Windows）
+   └── Windows: 检查 $PROFILE 中是否已有 gemini-chrome-fix / gemini-chrome-status
+       ├── 不存在 → Add-Content 追加函数定义（带 `n 前缀确保换行）
+       └── 已存在 → 跳过，幂等安全
 ```
 
 ### 安装流程图
@@ -246,7 +252,7 @@ run 命令触发
 **GeminiChromeAutoPatch**：
 - 触发条件：`AtLogOn`（用户登录时）
 - 设置：`AllowStartIfOnBatteries`、`DontStopIfGoingOnBatteries`、`StartWhenAvailable`
-- 执行：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File patch.ps1 run`
+- 执行：`powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File patch.ps1 run`
 
 > **限制**：Windows 无法实时监控文件变化，会话期间的 Chrome 更新需用户手动执行 `manual` 命令。
 
@@ -276,8 +282,10 @@ Chrome 进程检测方式：
 |----------|-------|---------|
 | 后台任务注册 | 检查 `launchctl list` | 检查 `Get-ScheduledTask` |
 | Plist/Task 文件 | 检查文件是否存在 | 检查任务是否注册 |
+| Chrome 运行状态 | — | `Get-Process chrome` |
 | 互斥锁状态 | 检查目录是否存在 | 检查目录是否存在 |
 | 冷却锁状态 | 显示距上次运行秒数 | 显示距上次运行秒数 |
+| 日志文件路径 | — | 显示 `$LogFile` 路径 |
 
 ---
 

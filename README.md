@@ -117,8 +117,8 @@ irm https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1 
 Add this to `~/.zshrc`:
 
 ```bash
-alias gemini-chrome-fix='$HOME/.gemini-chrome-autoinstall/patch.sh manual'
-alias gemini-chrome-status='$HOME/.gemini-chrome-autoinstall/patch.sh status'
+gemini-chrome-fix() { $HOME/.gemini-chrome-autoinstall/patch.sh manual; }
+gemini-chrome-status() { $HOME/.gemini-chrome-autoinstall/patch.sh status; }
 ```
 
 Then reload zsh:

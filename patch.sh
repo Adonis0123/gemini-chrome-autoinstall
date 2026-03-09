@@ -251,9 +251,19 @@ cmd_manual() {
     log "Manual install triggered."
 
     if pgrep -x "Google Chrome" >/dev/null 2>&1; then
-        log "Skipped: Chrome is still running. Close it first, then rerun 'manual'."
-        echo "Chrome is still running. Close it first, then rerun: ~/.gemini-chrome-autoinstall/patch.sh manual"
-        return 1
+        printf "Chrome is running. Close it to continue? (Y/N): "
+        read -r response
+        if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
+            log "Closing Chrome (user confirmed)..."
+            osascript -e 'quit app "Google Chrome"'
+            if ! wait_for_chrome_to_close; then
+                echo "Chrome did not exit in time. Please close it manually and retry."
+                return 1
+            fi
+        else
+            echo "Cancelled."
+            return 0
+        fi
     fi
 
     if ! acquire_active_lock; then

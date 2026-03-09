@@ -56,7 +56,7 @@ if ($changed) {
 
 Write-Host ""
 Write-Host "Installation complete!"
-Write-Host "Auto-check at logon is enabled. For same-session Chrome updates, use the manual fix command after you close Chrome."
+Write-Host "Auto-monitoring is enabled: registry watcher detects Chrome updates in real time, with a 4-hour fallback poll."
 Write-Host ""
 Write-Host "Useful commands:"
 Write-Host "  Check status:  gemini-chrome-status"

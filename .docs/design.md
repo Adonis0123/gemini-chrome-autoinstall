@@ -42,9 +42,15 @@ Chrome 更新 → 自动检测更新事件 → 等待 Chrome 关闭 → 重新�
 │              │                          │                │
 │              ├── Boot Agent             ├── Scheduled    │
 │              │   (登录触发)              │   Task         │
-│              └── Watcher Agent          │   (登录触发)    │
-│                  (文件监控触发)           │                │
-│                    ↓                    ↓                │
+│              └── Watcher Agent          │   (登录+4h)    │
+│                  (文件监控触发)           │     ↓          │
+│                    ↓                    │  scheduled     │
+│                    │                    │     │          │
+│                    │                    │     ├── 启动   │
+│                    │                    │     │  watch   │
+│                    │                    │     │  进程    │
+│                    │                    │     └── 兜底   │
+│                    │                    │        轮询    │
 │              patch.sh run         patch.ps1 run          │
 │                    │                    │                │
 │                    ├── 冷却锁检查        ├── 冷却锁检查    │
@@ -62,10 +68,12 @@ Chrome 更新 → 自动检测更新事件 → 等待 Chrome 关闭 → 重新�
 |------|-------|---------|
 | 安装器 | `install.sh` (bash) | `install.ps1` (PowerShell) |
 | 补丁脚本 | `patch.sh` (bash) | `patch.ps1` (PowerShell) |
-| 触发机制 | LaunchAgent × 2 | Scheduled Task × 1 |
-| 启动触发 | `RunAtLoad=true` | `AtLogOn` |
-| 更新检测 | `WatchPaths`（文件监控） | 无（仅登录触发） |
+| 触发机制 | LaunchAgent × 2 | Scheduled Task × 1（双触发器） |
+| 启动触发 | `RunAtLoad=true` | `AtLogOn` + 每 4 小时重复 |
+| 更新检测 | `WatchPaths`（文件监控） | 注册表监听（`RegNotifyChangeKeyValue`） |
+| 兜底机制 | 无需（WatchPaths 可靠） | `scheduled` 子命令周期轮询 |
 | Chrome 检测 | `pgrep -x "Google Chrome"` | `Get-Process chrome` |
+| 关闭确认 | `osascript -e 'quit app'` | `Stop-Process -Name chrome -Force` |
 | 日志路径 | `~/Library/Logs/` | `%LOCALAPPDATA%/` |
 
 ### 文件结构
@@ -75,7 +83,7 @@ gemini-chrome-autoinstall/
 ├── install.sh       # macOS 一键安装器：下载 patch.sh 并注册自动任务
 ├── install.ps1      # Windows 一键安装器：下载 patch.ps1 并注册自动任务
 ├── patch.sh         # macOS 核心控制脚本：6 个子命令
-├── patch.ps1        # Windows 核心控制脚本：6 个子命令
+├── patch.ps1        # Windows 核心控制脚本：8 个子命令
 ├── README.md        # 用户文档
 └── LICENSE          # MIT 许可证
 ```
@@ -94,7 +102,8 @@ gemini-chrome-autoinstall/
 
 # Windows
 %USERPROFILE%\.gemini-chrome-autoinstall\
-└── patch.ps1                                              # 控制脚本
+├── patch.ps1                                              # 控制脚本
+└── chrome-version.txt                                     # 记录的 Chrome 版本
 %LOCALAPPDATA%\
 └── gemini-chrome-autoinstall.log                          # 日志文件
 # Scheduled Task: "GeminiChromeAutoPatch"                  # 计划任务（-WindowStyle Hidden）
@@ -169,11 +178,13 @@ gemini-chrome-autoinstall/
 | 命令 | 用途 | 触发方式 | 关键特性 |
 |------|------|----------|----------|
 | `enable` | 注册并启动后台自动任务 | 安装时 / 用户手动 | 幂等：先卸载再加载 |
-| `disable` | 停止后台自动任务 | 用户手动 | 移除 Agent/Task 但保留脚本 |
-| `status` | 显示系统状态 | 用户手动 | 只读，不修改任何状态 |
+| `disable` | 停止后台自动任务 | 用户手动 | 移除 Agent/Task + 停止 watch 进程 |
+| `status` | 显示系统状态 | 用户手动 | 只读，显示 watch 进程和版本信息 |
 | `run` | 带锁和等待的完整补丁流程 | 自动触发 | 冷却锁 + 互斥锁 + Chrome 等待 |
-| `manual` | 快速手动补丁 | 用户手动 | 跳过冷却、要求 Chrome 已关闭 |
-| `uninstall` | 完全卸载 | 用户手动 | 移除所有文件和自动任务 |
+| `manual` | 快速手动补丁 | 用户手动 | 提示确认关闭 Chrome |
+| `uninstall` | 完全卸载 | 用户手动 | 移除所有文件、任务和 watch 进程 |
+| `watch` | 注册表监听守护进程 | scheduled 子命令 | Windows 专用，阻塞式零 CPU 监听 |
+| `scheduled` | 计划任务入口 | 计划任务调度 | Windows 专用，管理 watch + 兜底轮询 |
 
 ### 并发控制机制
 
@@ -247,14 +258,46 @@ run 命令触发
 
 两个 Agent 互为补充，冷却锁防止重复执行。
 
-#### Windows: 单 Scheduled Task 架构
+#### Windows: 计划任务 + 注册表监听架构
 
-**GeminiChromeAutoPatch**：
-- 触发条件：`AtLogOn`（用户登录时）
-- 设置：`AllowStartIfOnBatteries`、`DontStopIfGoingOnBatteries`、`StartWhenAvailable`
-- 执行：`powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File patch.ps1 run`
+**GeminiChromeAutoPatch 计划任务**：
+- 触发条件：`AtLogOn` + 每 4 小时重复
+- 执行：`patch.ps1 scheduled`
 
-> **限制**：Windows 无法实时监控文件变化，会话期间的 Chrome 更新需用户手动执行 `manual` 命令。
+**scheduled 子命令**（计划任务实际入口）：
+1. 检查是否已有 `watch` 进程运行（通过进程命令行匹配）
+2. 没有 → 后台启动 `watch` 进程（`Start-Process -WindowStyle Hidden`）
+3. 执行兜底版本对比轮询：读注册表 → 对比 `chrome-version.txt` → 变化则触发 `run`
+
+**watch 子命令**（注册表监听守护进程）：
+- 使用 Win32 API `RegNotifyChangeKeyValue` 监听 `HKCU:\Software\Google\Chrome\BLBeacon`
+- 监听 `REG_NOTIFY_CHANGE_LAST_SET`（值变化）
+- 阻塞式调用（`fAsynchronous=false`），不消耗 CPU
+- 每次通知后重新注册监听（Win32 API 要求）
+- 版本变化时调用 `Invoke-Run`
+
+**版本记录**：
+- 文件路径：`%USERPROFILE%\.gemini-chrome-autoinstall\chrome-version.txt`
+- 记录当前已知的 Chrome 版本，用于变化对比
+
+### 关闭浏览器确认（manual 命令）
+
+`manual` 命令在 Chrome 运行时不再直接报错退出，而是提示用户确认关闭：
+
+**macOS**：
+```bash
+printf "Chrome is running. Close it to continue? (Y/N): "
+read -r response
+# Y → osascript -e 'quit app "Google Chrome"'（优雅退出）
+# N → 取消操作
+```
+
+**Windows**：
+```powershell
+$response = Read-Host "Chrome is running. Close it to continue? (Y/N)"
+# Y → Stop-Process -Name "chrome" -Force
+# N → 取消操作
+```
 
 ### Chrome 等待机制
 
@@ -282,7 +325,10 @@ Chrome 进程检测方式：
 |----------|-------|---------|
 | 后台任务注册 | 检查 `launchctl list` | 检查 `Get-ScheduledTask` |
 | Plist/Task 文件 | 检查文件是否存在 | 检查任务是否注册 |
+| Watch 进程 | — | 检查进程命令行匹配 |
 | Chrome 运行状态 | — | `Get-Process chrome` |
+| 已保存版本 | — | 读取 `chrome-version.txt` |
+| 注册表版本 | — | 读取 `BLBeacon\version` |
 | 互斥锁状态 | 检查目录是否存在 | 检查目录是否存在 |
 | 冷却锁状态 | 显示距上次运行秒数 | 显示距上次运行秒数 |
 | 日志文件路径 | — | 显示 `$LogFile` 路径 |
@@ -362,8 +408,11 @@ Remove-Item $ActiveLock -ErrorAction SilentlyContinue
 | 特性 | macOS | Windows |
 |------|-------|---------|
 | **脚本解释器** | bash | PowerShell 5+ |
-| **自动触发方式** | LaunchAgent (Boot + Watcher) | Scheduled Task (Boot only) |
-| **实时更新检测** | 支持（WatchPaths 监控 Info.plist） | 不支持（需手动 `manual`） |
+| **自动触发方式** | LaunchAgent (Boot + Watcher) | Scheduled Task (AtLogOn + 4h repeat) |
+| **实时更新检测** | 支持（WatchPaths 监控 Info.plist） | 支持（RegNotifyChangeKeyValue 监听注册表） |
+| **兜底轮询** | 无需 | `scheduled` 子命令每 4 小时对比版本 |
+| **版本记录** | 无需 | `chrome-version.txt` |
+| **关闭确认（manual）** | `osascript` 优雅退出 | `Stop-Process` 强制关闭 |
 | **安装目录** | `~/.gemini-chrome-autoinstall/` | `%USERPROFILE%\.gemini-chrome-autoinstall\` |
 | **日志路径** | `~/Library/Logs/gemini-chrome-autoinstall.log` | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
 | **冷却锁路径** | `/tmp/gemini-chrome-autoinstall.lock` | `%TEMP%\gemini-chrome-autoinstall.lock` |

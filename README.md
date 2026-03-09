@@ -1,6 +1,6 @@
 # Gemini Chrome AutoInstall
 
-When Chrome updates and removes the [Gemini-in-Chrome](https://github.com/appsail/Gemini-in-Chrome) extension, this tool helps you bring it back with one command. On macOS it can also watch the Chrome app and auto-reinstall in the background; on Windows it auto-checks at logon and also gives you a fast manual recovery command for same-session updates.
+When Chrome updates and removes the [Gemini-in-Chrome](https://github.com/appsail/Gemini-in-Chrome) extension, this tool helps you bring it back with one command. On macOS it watches the Chrome app and auto-reinstalls in the background; on Windows it monitors the Chrome registry key for version changes and also gives you a fast manual recovery command.
 
 ## Install
 
@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/maste
 Done.
 
 - **macOS**: it will keep watching Chrome updates in the background.
-- **Windows**: it will auto-run at logon and register shortcut functions (`gemini-chrome-fix`, `gemini-chrome-status`) in your PowerShell profile. Restart PowerShell to use them. If Chrome updates during an already-open session, close Chrome and run `gemini-chrome-fix`.
+- **Windows**: it monitors Chrome version changes via registry watcher (with a 4-hour fallback poll). A manual fix command is also available. Restart PowerShell to use the shortcut functions.
 
 ## Quick Shortcuts
 
@@ -27,7 +27,7 @@ After installation, two shortcut commands are available on both platforms:
 
 | Command | Action |
 |---------|--------|
-| `gemini-chrome-fix` | Re-install the extension (close Chrome first) |
+| `gemini-chrome-fix` | Re-install the extension (offers to close Chrome if running) |
 | `gemini-chrome-status` | Check current status |
 
 ### macOS: add zsh commands
@@ -36,6 +36,9 @@ Add this to `~/.zshrc`:
 
 ```bash
 gemini-chrome-fix() { $HOME/.gemini-chrome-autoinstall/patch.sh manual; }
+```
+
+```bash
 gemini-chrome-status() { $HOME/.gemini-chrome-autoinstall/patch.sh status; }
 ```
 
@@ -47,6 +50,9 @@ These are **registered automatically** during installation. After restarting Pow
 
 ```powershell
 gemini-chrome-fix       # Re-install the extension
+```
+
+```powershell
 gemini-chrome-status    # Check current status
 ```
 
@@ -54,8 +60,17 @@ If they are missing (e.g. you reinstalled PowerShell or reset your profile), add
 
 ```powershell
 if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+```
+
+```powershell
 Add-Content $PROFILE "`nfunction gemini-chrome-fix { & `"`$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1`" manual }"
+```
+
+```powershell
 Add-Content $PROFILE "function gemini-chrome-status { & `"`$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1`" status }"
+```
+
+```powershell
 . $PROFILE
 ```
 
@@ -88,38 +103,73 @@ When triggered, the script waits for Chrome to close, then re-installs the exten
 
 ### Windows
 
-A Scheduled Task runs at logon (registered under the current user, no Administrator privileges required). It waits for Chrome to close, then re-installs the extension.
+A Scheduled Task runs at logon and repeats every 4 hours. It manages a background **registry watcher** that monitors `HKCU:\Software\Google\Chrome\BLBeacon\version` for changes using the Win32 `RegNotifyChangeKeyValue` API (blocking, zero CPU usage). When a version change is detected, it automatically triggers the patch.
 
-This is intentional: Windows does **not** watch every Chrome update event in real time. If Chrome updates during a session that is already open, just close Chrome and run `gemini-chrome-fix`.
+The scheduled task also performs a fallback version comparison poll each time it fires, ensuring no update is missed even if the watcher process was stopped.
 
 ### Safety
 
 - Waits for Chrome to close before patching (up to 10 min)
+- `manual` command offers to close Chrome for you (with confirmation)
 - Lock file prevents repeated runs within 5 minutes
 - Manual fix command is available on both platforms when you want to re-install immediately
 
 ## All Commands
 
-Full command reference for advanced usage:
+**macOS:**
 
 ```bash
-# macOS
-~/.gemini-chrome-autoinstall/patch.sh status     # Check if it's running
-~/.gemini-chrome-autoinstall/patch.sh run         # Patch now (waits for Chrome to close)
-~/.gemini-chrome-autoinstall/patch.sh manual      # Re-install now after Chrome is closed
-~/.gemini-chrome-autoinstall/patch.sh disable     # Stop auto-patching (keep files)
-~/.gemini-chrome-autoinstall/patch.sh enable      # Re-enable auto-patching
-~/.gemini-chrome-autoinstall/patch.sh uninstall   # Remove everything
+~/.gemini-chrome-autoinstall/patch.sh status      # Check if it's running
+```
+
+```bash
+~/.gemini-chrome-autoinstall/patch.sh run          # Patch now (waits for Chrome to close)
+```
+
+```bash
+~/.gemini-chrome-autoinstall/patch.sh manual       # Re-install now (offers to close Chrome)
+```
+
+```bash
+~/.gemini-chrome-autoinstall/patch.sh disable      # Stop auto-patching (keep files)
+```
+
+```bash
+~/.gemini-chrome-autoinstall/patch.sh enable       # Re-enable auto-patching
+```
+
+```bash
+~/.gemini-chrome-autoinstall/patch.sh uninstall    # Remove everything
+```
+
+**Windows:**
+
+```powershell
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
 ```
 
 ```powershell
-# Windows
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" run
+```
+
+```powershell
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual
+```
+
+```powershell
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" disable
+```
+
+```powershell
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" enable
+```
+
+```powershell
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
+```
+
+```powershell
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" watch
 ```
 
 ## Manual Fix

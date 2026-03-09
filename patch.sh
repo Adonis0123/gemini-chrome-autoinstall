@@ -280,6 +280,12 @@ cmd_manual() {
 
     disarm_active_lock_cleanup
     release_active_lock
+
+    if [ "$status" -eq 0 ]; then
+        log "Reopening Chrome..."
+        open -a "Google Chrome"
+    fi
+
     return $status
 }
 

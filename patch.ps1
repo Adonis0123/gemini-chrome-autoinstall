@@ -256,10 +256,15 @@ function Invoke-Manual {
 
     try {
         New-Item -Path $LockFile -ItemType File -Force | Out-Null
-        [void](Invoke-CoreInstall)
+        $success = Invoke-CoreInstall
     }
     finally {
         Exit-ActiveLock
+    }
+
+    if ($success) {
+        Write-Log "Reopening Chrome..."
+        Start-Process "chrome"
     }
 }
 

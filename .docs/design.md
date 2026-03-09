@@ -180,8 +180,8 @@ gemini-chrome-autoinstall/
 | `enable` | 注册并启动后台自动任务 | 安装时 / 用户手动 | 幂等：先卸载再加载 |
 | `disable` | 停止后台自动任务 | 用户手动 | 移除 Agent/Task + 停止 watch 进程 |
 | `status` | 显示系统状态 | 用户手动 | 只读，显示 watch 进程和版本信息 |
-| `run` | 带锁和等待的完整补丁流程 | 自动触发 | 冷却锁 + 互斥锁 + Chrome 等待 |
-| `manual` | 快速手动补丁 | 用户手动 | 提示确认关闭 Chrome |
+| `run` | 带锁和等待的完整补丁流程 | 自动触发 | 冷却锁 + 互斥锁 + Chrome 等待，返回成功/失败 |
+| `manual` | 快速手动补丁 | 用户手动 | 提示确认关闭 Chrome + 等待退出循环 |
 | `uninstall` | 完全卸载 | 用户手动 | 移除所有文件、任务和 watch 进程 |
 | `watch` | 注册表监听守护进程 | scheduled 子命令 | Windows 专用，阻塞式零 CPU 监听 |
 | `scheduled` | 计划任务入口 | 计划任务调度 | Windows 专用，管理 watch + 兜底轮询 |
@@ -239,6 +239,8 @@ run 命令触发
     ↓
 执行核心安装
     ↓
+返回成功/失败（调用方据此决定是否更新版本文件）
+    ↓
 释放互斥锁（trap 自动触发）
 ```
 
@@ -265,30 +267,35 @@ run 命令触发
 - 执行：`patch.ps1 scheduled`
 
 **scheduled 子命令**（计划任务实际入口）：
-1. 检查是否已有 `watch` 进程运行（通过进程命令行匹配）
-2. 没有 → 后台启动 `watch` 进程（`Start-Process -WindowStyle Hidden`）
-3. 执行兜底版本对比轮询：读注册表 → 对比 `chrome-version.txt` → 变化则触发 `run`
+1. **先执行兜底轮询**：读注册表版本 → 对比 `chrome-version.txt` → 变化则触发 `run`，成功后才更新版本文件
+2. 检查是否已有 `watch` 进程运行（通过进程命令行匹配）
+3. 没有 → 后台启动 `watch` 进程（`Start-Process -WindowStyle Hidden`）
+
+> **顺序设计**：先轮询再启动 watch，避免 watch 启动时初始化版本文件覆盖尚未对比的旧版本记录。
 
 **watch 子命令**（注册表监听守护进程）：
 - 使用 Win32 API `RegNotifyChangeKeyValue` 监听 `HKCU:\Software\Google\Chrome\BLBeacon`
 - 监听 `REG_NOTIFY_CHANGE_LAST_SET`（值变化）
 - 阻塞式调用（`fAsynchronous=false`），不消耗 CPU
 - 每次通知后重新注册监听（Win32 API 要求）
-- 版本变化时调用 `Invoke-Run`
+- 版本变化时调用 `Invoke-Run`，仅在补丁成功后才更新版本文件
+- 启动时仅在版本文件**不存在**时初始化，不覆盖已有记录
 
 **版本记录**：
 - 文件路径：`%USERPROFILE%\.gemini-chrome-autoinstall\chrome-version.txt`
-- 记录当前已知的 Chrome 版本，用于变化对比
+- 记录最近一次**成功补丁**对应的 Chrome 版本
+- 补丁失败时保留旧版本，确保下次触发仍会重试
 
 ### 关闭浏览器确认（manual 命令）
 
-`manual` 命令在 Chrome 运行时不再直接报错退出，而是提示用户确认关闭：
+`manual` 命令在 Chrome 运行时不再直接报错退出，而是提示用户确认关闭，并等待进程完全退出后再继续安装：
 
 **macOS**：
 ```bash
 printf "Chrome is running. Close it to continue? (Y/N): "
 read -r response
 # Y → osascript -e 'quit app "Google Chrome"'（优雅退出）
+#   → 复用 wait_for_chrome_to_close 循环确认退出（超时则中止）
 # N → 取消操作
 ```
 
@@ -296,6 +303,7 @@ read -r response
 ```powershell
 $response = Read-Host "Chrome is running. Close it to continue? (Y/N)"
 # Y → Stop-Process -Name "chrome" -Force
+#   → 复用 Wait-ForChromeToExit 循环确认退出（超时则中止）
 # N → 取消操作
 ```
 

@@ -91,7 +91,7 @@ function Invoke-Enable {
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Hours 4) `
-        -RepetitionDuration ([TimeSpan]::MaxValue)
+        -RepetitionDuration (New-TimeSpan -Days 365)
 
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `

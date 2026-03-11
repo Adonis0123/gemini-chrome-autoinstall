@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/maste
 Done.
 
 - **macOS**: it will keep watching Chrome updates in the background.
-- **Windows**: it monitors Chrome version changes via registry watcher (with a 4-hour fallback poll). A manual fix command is also available. Restart PowerShell to use the shortcut functions.
+- **Windows**: it monitors Chrome version changes via registry watcher in real time. A manual fix command is also available. Restart PowerShell to use the shortcut functions.
 
 ## Quick Shortcuts
 
@@ -88,7 +88,7 @@ Add-Content $PROFILE "function gemini-chrome-status { & `"`$env:USERPROFILE\.gem
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
 ```
 
-> Note: uninstall removes the scheduled task and script files but does not remove the shortcut functions from your PowerShell profile. To clean those up, edit `$PROFILE` manually.
+> Note: uninstall removes the startup entry and script files but does not remove the shortcut functions from your PowerShell profile. To clean those up, edit `$PROFILE` manually.
 
 ## How It Works
 
@@ -103,9 +103,7 @@ When triggered, the script waits for Chrome to close, then re-installs the exten
 
 ### Windows
 
-A Scheduled Task runs at logon and repeats every 4 hours. It manages a background **registry watcher** that monitors `HKCU:\Software\Google\Chrome\BLBeacon\version` for changes using the Win32 `RegNotifyChangeKeyValue` API (blocking, zero CPU usage). When a version change is detected, it automatically triggers the patch.
-
-The scheduled task also performs a fallback version comparison poll each time it fires, ensuring no update is missed even if the watcher process was stopped.
+A startup entry (HKCU Registry Run key) launches the watcher at logon. The background **registry watcher** monitors `HKCU:\Software\Google\Chrome\BLBeacon\version` for changes using the Win32 `RegNotifyChangeKeyValue` API (blocking, zero CPU usage). When a version change is detected, it automatically triggers the patch. No admin privileges are required.
 
 ### Safety
 

@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$TaskName = "GeminiChromeAutoPatch"
+$TaskName = "GeminiChromeAutoPatch"  # legacy: only used for cleanup of old scheduled task
 $RunRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunRegName = "GeminiChromeAutoPatch"
 $ScriptPath = $PSScriptRoot

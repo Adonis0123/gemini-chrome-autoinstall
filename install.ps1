@@ -65,7 +65,7 @@ if ($changed) {
 
 Write-Host ""
 Write-Host "Installation complete!"
-Write-Host "Auto-monitoring is enabled: registry watcher detects Chrome updates in real time, with a 4-hour fallback poll."
+Write-Host "Auto-monitoring is enabled: registry watcher detects Chrome updates in real time."
 Write-Host ""
 Write-Host "Useful commands:"
 Write-Host "  Check status:  gemini-chrome-status"

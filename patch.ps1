@@ -89,9 +89,6 @@ function Invoke-Enable {
         -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$patchScript`" scheduled"
 
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
-    $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-        -RepetitionInterval (New-TimeSpan -Hours 4) `
-        -RepetitionDuration (New-TimeSpan -Days 365)
 
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
@@ -103,14 +100,14 @@ function Invoke-Enable {
     Register-ScheduledTask `
         -TaskName $TaskName `
         -Action $action `
-        -Trigger @($triggerLogon, $triggerRepeat) `
+        -Trigger $triggerLogon `
         -Settings $settings `
         -Principal $principal `
         -Description "Automatically re-install Gemini-in-Chrome extension after Chrome updates" `
         -Force | Out-Null
 
-    Write-Log "Enabled: scheduled task '$TaskName' registered (logon + every 4h)."
-    Write-Host "Done. Scheduled task '$TaskName' is now enabled (logon + every 4h repeat)."
+    Write-Log "Enabled: scheduled task '$TaskName' registered (at logon)."
+    Write-Host "Done. Scheduled task '$TaskName' is now enabled (at logon)."
 }
 
 function Stop-WatchProcess {
@@ -396,25 +393,7 @@ public class RegistryWatcher {
 function Invoke-Scheduled {
     Write-Log "Scheduled task entry triggered."
 
-    # Fallback poll FIRST: compare before watch can overwrite version file
-    $currentVersion = Get-ChromeRegistryVersion
-    $savedVersion = Get-SavedChromeVersion
-
-    if ($currentVersion -and $savedVersion -and $currentVersion -ne $savedVersion) {
-        Write-Log "Scheduled: version mismatch detected ($savedVersion -> $currentVersion). Triggering patch."
-        if (Invoke-Run) {
-            Save-ChromeVersion $currentVersion
-        }
-    } elseif ($currentVersion -and -not $savedVersion) {
-        Write-Log "Scheduled: no saved version found. Saving current version $currentVersion."
-        if (Invoke-Run) {
-            Save-ChromeVersion $currentVersion
-        }
-    } else {
-        Write-Log "Scheduled: no version change detected."
-    }
-
-    # Then ensure watch process is running
+    # Ensure watch process is running
     $watchRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
 

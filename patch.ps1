@@ -393,6 +393,18 @@ public class RegistryWatcher {
 function Invoke-Scheduled {
     Write-Log "Scheduled task entry triggered."
 
+    # Self-heal: re-register task if legacy repeat trigger exists
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        $hasRepeat = $task.Triggers | Where-Object { $_.Repetition.Interval }
+        if ($hasRepeat) {
+            Write-Log "Scheduled: detected legacy repeat trigger. Re-registering task."
+            Invoke-Enable
+        }
+    } catch {
+        Write-Log "Scheduled: task not found, skipping self-heal."
+    }
+
     # Ensure watch process is running
     $watchRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }

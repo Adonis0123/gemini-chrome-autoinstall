@@ -68,10 +68,10 @@ Chrome 更新 → 自动检测更新事件 → 等待 Chrome 关闭 → 重新�
 |------|-------|---------|
 | 安装器 | `install.sh` (bash) | `install.ps1` (PowerShell) |
 | 补丁脚本 | `patch.sh` (bash) | `patch.ps1` (PowerShell) |
-| 触发机制 | LaunchAgent × 2 | Scheduled Task × 1（双触发器） |
-| 启动触发 | `RunAtLoad=true` | `AtLogOn` + 每 4 小时重复 |
+| 触发机制 | LaunchAgent × 2 | Registry Run key（开机自启） |
+| 启动触发 | `RunAtLoad=true` | `HKCU\...\Run`（登录时启动） |
 | 更新检测 | `WatchPaths`（文件监控） | 注册表监听（`RegNotifyChangeKeyValue`） |
-| 兜底机制 | 无需（WatchPaths 可靠） | `scheduled` 子命令周期轮询 |
+| 兜底机制 | 无需（WatchPaths 可靠） | 无需（注册表监听实时触发） |
 | Chrome 检测 | `pgrep -x "Google Chrome"` | `Get-Process chrome` |
 | 关闭确认 | `osascript -e 'quit app'` | `Stop-Process -Name chrome -Force` |
 | 日志路径 | `~/Library/Logs/` | `%LOCALAPPDATA%/` |
@@ -106,7 +106,7 @@ gemini-chrome-autoinstall/
 └── chrome-version.txt                                     # 记录的 Chrome 版本
 %LOCALAPPDATA%\
 └── gemini-chrome-autoinstall.log                          # 日志文件
-# Scheduled Task: "GeminiChromeAutoPatch"                  # 计划任务（-WindowStyle Hidden）
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GeminiChromeAutoPatch  # 开机自启（Registry Run key）
 # $PROFILE 中注册 gemini-chrome-fix / gemini-chrome-status 快捷函数
 ```
 
@@ -184,7 +184,7 @@ gemini-chrome-autoinstall/
 | `manual` | 快速手动补丁 | 用户手动 | 提示确认关闭 Chrome + 等待退出循环 |
 | `uninstall` | 完全卸载 | 用户手动 | 移除所有文件、任务和 watch 进程 |
 | `watch` | 注册表监听守护进程 | scheduled 子命令 | Windows 专用，阻塞式零 CPU 监听 |
-| `scheduled` | 计划任务入口 | 计划任务调度 | Windows 专用，管理 watch + 兜底轮询 |
+| `scheduled` | 启动入口 | Registry Run key | Windows 专用，确保 watch 进程运行 |
 
 ### 并发控制机制
 
@@ -260,18 +260,15 @@ run 命令触发
 
 两个 Agent 互为补充，冷却锁防止重复执行。
 
-#### Windows: 计划任务 + 注册表监听架构
+#### Windows: Registry Run key + 注册表监听架构
 
-**GeminiChromeAutoPatch 计划任务**：
-- 触发条件：`AtLogOn` + 每 4 小时重复
-- 执行：`patch.ps1 scheduled`
+**开机自启**：
+- 通过 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` 注册
+- 登录时执行 `wscript.exe launcher.vbs scheduled`（无需管理员权限）
 
-**scheduled 子命令**（计划任务实际入口）：
-1. **先执行兜底轮询**：读注册表版本 → 对比 `chrome-version.txt` → 变化则触发 `run`，成功后才更新版本文件
-2. 检查是否已有 `watch` 进程运行（通过进程命令行匹配）
-3. 没有 → 后台启动 `watch` 进程（`Start-Process -WindowStyle Hidden`）
-
-> **顺序设计**：先轮询再启动 watch，避免 watch 启动时初始化版本文件覆盖尚未对比的旧版本记录。
+**scheduled 子命令**（启动入口）：
+1. 检查是否已有 `watch` 进程运行（通过进程命令行匹配）
+2. 没有 → 后台启动 `watch` 进程（`Start-Process -WindowStyle Hidden`）
 
 **watch 子命令**（注册表监听守护进程）：
 - 使用 Win32 API `RegNotifyChangeKeyValue` 监听 `HKCU:\Software\Google\Chrome\BLBeacon`
@@ -416,9 +413,9 @@ Remove-Item $ActiveLock -ErrorAction SilentlyContinue
 | 特性 | macOS | Windows |
 |------|-------|---------|
 | **脚本解释器** | bash | PowerShell 5+ |
-| **自动触发方式** | LaunchAgent (Boot + Watcher) | Scheduled Task (AtLogOn + 4h repeat) |
+| **自动触发方式** | LaunchAgent (Boot + Watcher) | Registry Run key（登录时启动） |
 | **实时更新检测** | 支持（WatchPaths 监控 Info.plist） | 支持（RegNotifyChangeKeyValue 监听注册表） |
-| **兜底轮询** | 无需 | `scheduled` 子命令每 4 小时对比版本 |
+| **兜底轮询** | 无需 | 无需（注册表监听实时触发） |
 | **版本记录** | 无需 | `chrome-version.txt` |
 | **关闭确认（manual）** | `osascript` 优雅退出 | `Stop-Process` 强制关闭 |
 | **安装目录** | `~/.gemini-chrome-autoinstall/` | `%USERPROFILE%\.gemini-chrome-autoinstall\` |

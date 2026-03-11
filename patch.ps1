@@ -6,6 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $TaskName = "GeminiChromeAutoPatch"
+$RunRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$RunRegName = "GeminiChromeAutoPatch"
 $ScriptPath = $PSScriptRoot
 $LogFile = Join-Path $env:LOCALAPPDATA "gemini-chrome-autoinstall.log"
 $LockFile = Join-Path $env:TEMP "gemini-chrome-autoinstall.lock"
@@ -91,15 +93,20 @@ function Invoke-Enable {
 
     $taskCommand = "wscript.exe `"$launcherVbs`" scheduled"
 
-    schtasks /create /tn $TaskName /tr $taskCommand /sc ONLOGON /rl LIMITED /f 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "Error: failed to create scheduled task (exit code $LASTEXITCODE)."
-        Write-Host "Error: failed to create scheduled task."
+    # Remove legacy scheduled task if it exists (ignore errors - may need admin)
+    try { schtasks /delete /tn $TaskName /f 2>&1 | Out-Null } catch {}
+
+    # Register via HKCU Run key (no admin required)
+    try {
+        Set-ItemProperty -Path $RunRegPath -Name $RunRegName -Value $taskCommand -ErrorAction Stop
+    } catch {
+        Write-Log "Error: failed to set registry Run key: $_"
+        Write-Host "Error: failed to register startup entry."
         return
     }
 
-    Write-Log "Enabled: scheduled task '$TaskName' registered (at logon)."
-    Write-Host "Done. Scheduled task '$TaskName' is now enabled (at logon)."
+    Write-Log "Enabled: registry Run key '$RunRegName' registered (at logon)."
+    Write-Host "Done. Startup entry '$RunRegName' is now enabled (at logon)."
 }
 
 function Stop-WatchProcess {
@@ -116,24 +123,28 @@ function Stop-WatchProcess {
 function Invoke-Disable {
     Stop-WatchProcess
 
-    schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Log "Disabled: scheduled task '$TaskName' removed."
-        Write-Host "Done. Scheduled task '$TaskName' has been removed."
+    # Remove legacy scheduled task if it exists (ignore errors - may need admin)
+    try { schtasks /delete /tn $TaskName /f 2>&1 | Out-Null } catch {}
+
+    # Remove registry Run key
+    $existing = Get-ItemProperty -Path $RunRegPath -Name $RunRegName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Remove-ItemProperty -Path $RunRegPath -Name $RunRegName -ErrorAction SilentlyContinue
+        Write-Log "Disabled: registry Run key '$RunRegName' removed."
+        Write-Host "Done. Startup entry '$RunRegName' has been removed."
     } else {
-        Write-Host "Task '$TaskName' not found or already removed."
+        Write-Host "Startup entry '$RunRegName' not found or already removed."
     }
 }
 
 function Invoke-Status {
     Write-Host "=== Gemini Chrome AutoInstall Status ==="
 
-    $taskInfo = schtasks /query /tn $TaskName /fo CSV /nh 2>$null
-    if ($LASTEXITCODE -eq 0 -and $taskInfo) {
-        $status = ($taskInfo | ConvertFrom-Csv -Header TaskName,NextRun,Status).Status
-        Write-Host "  Task:      REGISTERED ($status)"
+    $runEntry = Get-ItemProperty -Path $RunRegPath -Name $RunRegName -ErrorAction SilentlyContinue
+    if ($runEntry) {
+        Write-Host "  Startup:   REGISTERED (Registry Run key)"
     } else {
-        Write-Host "  Task:      NOT REGISTERED"
+        Write-Host "  Startup:   NOT REGISTERED"
     }
 
     $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
@@ -382,18 +393,7 @@ public class RegistryWatcher {
 }
 
 function Invoke-Scheduled {
-    Write-Log "Scheduled task entry triggered."
-
-    # Self-heal: re-register task if legacy repeat trigger exists
-    try {
-        $xml = schtasks /query /tn $TaskName /xml 2>$null
-        if ($LASTEXITCODE -eq 0 -and ($xml -join "`n") -match '<Repetition>') {
-            Write-Log "Scheduled: detected legacy repeat trigger. Re-registering task."
-            Invoke-Enable
-        }
-    } catch {
-        Write-Log "Scheduled: task not found, skipping self-heal."
-    }
+    Write-Log "Scheduled entry triggered."
 
     # Ensure watch process is running
     $watchRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
@@ -423,8 +423,8 @@ switch ($Command) {
         Write-Host "Usage: .\patch.ps1 {enable|disable|uninstall|status|run|manual|watch}"
         Write-Host ""
         Write-Host "Commands:"
-        Write-Host "  enable      Register scheduled task for auto-patching"
-        Write-Host "  disable     Remove scheduled task and stop watcher"
+        Write-Host "  enable      Register startup entry for auto-patching"
+        Write-Host "  disable     Remove startup entry and stop watcher"
         Write-Host "  uninstall   Disable and remove all installed files"
         Write-Host "  status      Show current status (incl. watcher and versions)"
         Write-Host "  run         Execute the patch (waits for Chrome to close)"

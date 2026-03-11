@@ -46,4 +46,5 @@ commit_parsers = [
 tag_pattern = "v[0-9].*"
 
 [bump]
+initial_tag = "v0.0.0"
 breaking_always_bump_major = true

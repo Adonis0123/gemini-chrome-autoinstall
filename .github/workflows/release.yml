@@ -24,11 +24,23 @@ jobs:
       - name: Determine next version
         id: version
         run: |
-          NEXT_VERSION=$(git cliff --bumped-version 2>/dev/null || echo "")
-          if [ -z "$NEXT_VERSION" ]; then
-            echo "No version bump needed (docs/chore only). Skipping release."
+          # stderr has warnings, stdout has the version
+          NEXT_VERSION=$(git cliff --bumped-version 2>/dev/null) || true
+          echo "git-cliff output: [$NEXT_VERSION]"
+
+          # Skip if empty or not a valid version tag
+          if [[ -z "$NEXT_VERSION" || ! "$NEXT_VERSION" =~ ^v[0-9] ]]; then
+            echo "No version bump needed. Skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip if this tag already exists (no new releasable commits)
+          if git rev-parse "$NEXT_VERSION" >/dev/null 2>&1; then
+            echo "Tag $NEXT_VERSION already exists. Skipping release."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
+            echo "Will release $NEXT_VERSION"
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
           fi

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.1] - 2026-03-11
+
+### Refactoring
+
+- Replace *-ScheduledTask cmdlets with schtasks.exe to eliminate admin dependency([fc812e3](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/fc812e33cfa3c516993c8a62d5a549d8e3c5c1d0))
 ## [0.0.0] - 2026-03-11
 
 ### Features

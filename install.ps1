@@ -22,6 +22,15 @@ if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")) {
 }
 Invoke-WebRequest @downloadParams
 
+$downloadParams2 = @{
+    Uri = "$RawBase/launcher.vbs"
+    OutFile = (Join-Path $InstallDir "launcher.vbs")
+}
+if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")) {
+    $downloadParams2.UseBasicParsing = $true
+}
+Invoke-WebRequest @downloadParams2
+
 & (Join-Path $InstallDir "patch.ps1") enable
 
 # Register shortcut functions in PowerShell profile

@@ -82,29 +82,21 @@ function Invoke-CoreInstall {
 }
 
 function Invoke-Enable {
-    $patchScript = Join-Path $ScriptPath "patch.ps1"
+    $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
+    if (-not (Test-Path $launcherVbs)) {
+        Write-Log "Error: launcher.vbs not found at $launcherVbs"
+        Write-Host "Error: launcher.vbs not found. Please re-run install."
+        return
+    }
 
-    $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$patchScript`" scheduled"
+    $taskCommand = "wscript.exe `"$launcherVbs`" scheduled"
 
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
-
-    $settings = New-ScheduledTaskSettingsSet `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable
-
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-
-    Register-ScheduledTask `
-        -TaskName $TaskName `
-        -Action $action `
-        -Trigger $triggerLogon `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "Automatically re-install Gemini-in-Chrome extension after Chrome updates" `
-        -Force | Out-Null
+    schtasks /create /tn $TaskName /tr $taskCommand /sc ONLOGON /rl LIMITED /f 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "Error: failed to create scheduled task (exit code $LASTEXITCODE)."
+        Write-Host "Error: failed to create scheduled task."
+        return
+    }
 
     Write-Log "Enabled: scheduled task '$TaskName' registered (at logon)."
     Write-Host "Done. Scheduled task '$TaskName' is now enabled (at logon)."
@@ -124,12 +116,11 @@ function Stop-WatchProcess {
 function Invoke-Disable {
     Stop-WatchProcess
 
-    try {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Log "Disabled: scheduled task '$TaskName' removed."
         Write-Host "Done. Scheduled task '$TaskName' has been removed."
-    }
-    catch {
+    } else {
         Write-Host "Task '$TaskName' not found or already removed."
     }
 }
@@ -137,11 +128,11 @@ function Invoke-Disable {
 function Invoke-Status {
     Write-Host "=== Gemini Chrome AutoInstall Status ==="
 
-    try {
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Write-Host "  Task:      REGISTERED ($($task.State))"
-    }
-    catch {
+    $taskInfo = schtasks /query /tn $TaskName /fo CSV /nh 2>$null
+    if ($LASTEXITCODE -eq 0 -and $taskInfo) {
+        $status = ($taskInfo | ConvertFrom-Csv -Header TaskName,NextRun,Status).Status
+        Write-Host "  Task:      REGISTERED ($status)"
+    } else {
         Write-Host "  Task:      NOT REGISTERED"
     }
 
@@ -395,9 +386,8 @@ function Invoke-Scheduled {
 
     # Self-heal: re-register task if legacy repeat trigger exists
     try {
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        $hasRepeat = $task.Triggers | Where-Object { $_.Repetition.Interval }
-        if ($hasRepeat) {
+        $xml = schtasks /query /tn $TaskName /xml 2>$null
+        if ($LASTEXITCODE -eq 0 -and ($xml -join "`n") -match '<Repetition>') {
             Write-Log "Scheduled: detected legacy repeat trigger. Re-registering task."
             Invoke-Enable
         }
@@ -411,9 +401,9 @@ function Invoke-Scheduled {
 
     if (-not $watchRunning) {
         Write-Log "Scheduled: starting watch process in background."
-        $patchScript = Join-Path $ScriptPath "patch.ps1"
-        Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$patchScript`" watch" `
+        $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
+        Start-Process -FilePath "wscript.exe" `
+            -ArgumentList "`"$launcherVbs`" watch" `
             -WindowStyle Hidden
     } else {
         Write-Log "Scheduled: watch process already running."

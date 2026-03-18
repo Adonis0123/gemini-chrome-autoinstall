@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-03-18
+
+### Bug Fixes
+
+- *(install)* Read user input from /dev/tty in manual mode([8b0612f](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/8b0612f19ebb0b8462b054f826b4c4b01257b322))
 ## [0.1.0] - 2026-03-18
 
 ### Features

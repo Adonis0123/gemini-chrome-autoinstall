@@ -252,7 +252,7 @@ cmd_manual() {
 
     if pgrep -x "Google Chrome" >/dev/null 2>&1; then
         printf "Chrome is running. Close it to continue? (Y/N): "
-        read -r response
+        read -r response < /dev/tty
         if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
             log "Closing Chrome (user confirmed)..."
             osascript -e 'quit app "Google Chrome"'

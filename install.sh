@@ -19,6 +19,11 @@ chmod +x "$INSTALL_DIR/patch.sh"
 "$INSTALL_DIR/patch.sh" enable
 
 echo ""
+echo "Running first-time patch..."
+echo ""
+"$INSTALL_DIR/patch.sh" manual
+
+echo ""
 echo "Installation complete!"
 echo "The extension will be re-installed automatically after every Chrome update."
 echo ""

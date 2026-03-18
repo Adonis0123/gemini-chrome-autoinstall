@@ -33,6 +33,11 @@ Invoke-WebRequest @downloadParams2
 
 & (Join-Path $InstallDir "patch.ps1") enable
 
+Write-Host ""
+Write-Host "Running first-time patch..."
+Write-Host ""
+& (Join-Path $InstallDir "patch.ps1") manual
+
 # Register shortcut functions in PowerShell profile
 $profilePath = $PROFILE
 $fixFunc = 'function gemini-chrome-fix { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual }'

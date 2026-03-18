@@ -37,7 +37,31 @@ check_cooldown() {
 
 acquire_active_lock() {
     if mkdir "$ACTIVE_LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$ACTIVE_LOCK_DIR/pid"
         return 0
+    fi
+
+    # Check if the lock holder is still alive
+    local stale=false
+    local pid_file="$ACTIVE_LOCK_DIR/pid"
+    if [ -f "$pid_file" ]; then
+        local old_pid
+        old_pid=$(cat "$pid_file" 2>/dev/null)
+        if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
+            stale=true
+        fi
+    else
+        # Lock dir exists but no pid file — stale from old version
+        stale=true
+    fi
+
+    if [ "$stale" = true ]; then
+        log "Removing stale active lock (previous run did not clean up)."
+        release_active_lock
+        if mkdir "$ACTIVE_LOCK_DIR" 2>/dev/null; then
+            echo $$ > "$ACTIVE_LOCK_DIR/pid"
+            return 0
+        fi
     fi
 
     log "Skipped: another run is already in progress."
@@ -46,15 +70,16 @@ acquire_active_lock() {
 }
 
 release_active_lock() {
-    rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || true
+    rm -f "$ACTIVE_LOCK_DIR/pid" 2>/dev/null
+    rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || rm -rf "$ACTIVE_LOCK_DIR" 2>/dev/null || true
 }
 
 arm_active_lock_cleanup() {
-    trap 'release_active_lock' EXIT
+    trap 'release_active_lock' INT TERM EXIT
 }
 
 disarm_active_lock_cleanup() {
-    trap - EXIT
+    trap - INT TERM EXIT
 }
 
 wait_for_chrome_to_close() {
@@ -255,7 +280,7 @@ cmd_manual() {
         read -r response < /dev/tty
         if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
             log "Closing Chrome (user confirmed)..."
-            osascript -e 'quit app "Google Chrome"'
+            killall "Google Chrome" 2>/dev/null
             if ! wait_for_chrome_to_close; then
                 echo "Chrome did not exit in time. Please close it manually and retry."
                 return 1

@@ -42,9 +42,36 @@ function Test-Cooldown {
 function Enter-ActiveLock {
     try {
         New-Item -Path $ActiveLockDir -ItemType Directory -ErrorAction Stop | Out-Null
+        $PID | Out-File -FilePath (Join-Path $ActiveLockDir "pid") -NoNewline
         return $true
     }
     catch {
+        # Check if the lock holder is still alive
+        $pidFile = Join-Path $ActiveLockDir "pid"
+        $stale = $false
+        if (Test-Path $pidFile) {
+            $oldPid = Get-Content $pidFile -ErrorAction SilentlyContinue
+            if ($oldPid) {
+                $proc = Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue
+                if (-not $proc) { $stale = $true }
+            } else {
+                $stale = $true
+            }
+        } else {
+            # Lock dir exists but no pid file — stale from old version
+            $stale = $true
+        }
+
+        if ($stale) {
+            Write-Log "Removing stale active lock (previous run did not clean up)."
+            Exit-ActiveLock
+            try {
+                New-Item -Path $ActiveLockDir -ItemType Directory -ErrorAction Stop | Out-Null
+                $PID | Out-File -FilePath (Join-Path $ActiveLockDir "pid") -NoNewline
+                return $true
+            } catch {}
+        }
+
         Write-Log "Skipped: another run is already in progress."
         Write-Host "Another run is already in progress."
         return $false

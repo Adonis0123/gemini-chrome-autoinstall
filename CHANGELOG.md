@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-03-18
+
+### Bug Fixes
+
+- *(lock)* Recover stale active locks via PID-based liveness check([16732f7](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/16732f71c43137265cb86d72e8399c0028243356))
 ## [0.1.1] - 2026-03-18
 
 ### Bug Fixes

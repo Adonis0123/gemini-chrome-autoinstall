@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0] - 2026-03-18
+
+### Features
+
+- *(install)* Run first-time patch automatically after installation([81363f2](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/81363f28d53c869e3621f03272e2f44833aea1e7))
 ## [0.0.2] - 2026-03-11
 
 ### Bug Fixes

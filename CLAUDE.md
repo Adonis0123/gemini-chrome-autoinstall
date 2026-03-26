@@ -14,32 +14,43 @@ Three-layer design per platform:
 Installer (install.sh / install.ps1)
   → downloads + enables
 Core Script (patch.sh / patch.ps1)
-  → subcommand dispatch (enable, disable, run, manual, status, uninstall)
+  → subcommand dispatch (enable, disable, run, retry, manual, status, uninstall)
 Auto-trigger Mechanism
-  → macOS: two LaunchAgents (boot + file watcher on Chrome Info.plist)
-  → Windows: Scheduled Task + registry watch daemon (Win32 RegNotifyChangeKeyValue)
+  → macOS: three LaunchAgents (boot + file watcher + KeepAlive retry)
+  → Windows: Registry Run key + registry watch daemon (async Win32 RegNotifyChangeKeyValue)
 ```
 
 ### macOS trigger flow
 - **Boot Agent** (`com.gemini-chrome-autoinstall.boot.plist`): fires `patch.sh run` at login
 - **Watcher Agent** (`com.gemini-chrome-autoinstall.watcher.plist`): monitors Chrome's `Info.plist` changes, fires `patch.sh run`
+- **Retry Agent** (`com.gemini-chrome-autoinstall.retry.plist`): KeepAlive with PathState on `pending` file, fires `patch.sh retry` every 60s while pending exists
 
 ### Windows trigger flow
-- **Scheduled Task** (`GeminiChromeAutoPatch`): fires `patch.ps1 scheduled` at login + every 4 hours
-- `scheduled` subcommand: runs poll-based version check, then spawns `watch` daemon
-- `watch` daemon: blocks on registry key change for `HKCU:\Software\Google\Chrome\BLBeacon\version`
+- **Registry Run key** (`GeminiChromeAutoPatch`): fires `patch.ps1 scheduled` at login
+- `scheduled` subcommand: checks pending installs, then spawns `watch` daemon
+- `watch` daemon: async `RegNotifyChangeKeyValue` with 60s timeout on `HKCU:\Software\Google\Chrome\BLBeacon`, checks pending on each timeout
 
-### Concurrency control (dual-lock)
-- **Cooldown lock** (file timestamp, 300s): prevents re-execution within 5 minutes
-- **Active lock** (atomic `mkdir`): prevents concurrent patch instances
+### Version-based skip (replaces cooldown)
+- Compares Chrome's current version against `patched-version.txt`
+- If versions match → skip (already patched for this version)
+- If versions differ → needs patching
+
+### Pending-retry mechanism
+- When Chrome is running during trigger → create `pending` flag file → exit immediately (no waiting)
+- macOS: KeepAlive retry agent detects pending file, retries every 60s until Chrome closes
+- Windows: watch daemon timeout loop checks pending every 60s
+
+### Concurrency control
+- **Active lock** (atomic `mkdir`): prevents concurrent patch instances, with PID-based stale lock recovery
 
 ### Key paths at runtime
 | Item | macOS | Windows |
 |------|-------|---------|
 | Install dir | `~/.gemini-chrome-autoinstall/` | `%USERPROFILE%\.gemini-chrome-autoinstall\` |
 | Log | `~/Library/Logs/gemini-chrome-autoinstall.log` | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
-| Cooldown lock | `/tmp/gemini-chrome-autoinstall.lock` | `%TEMP%\gemini-chrome-autoinstall.lock` |
 | Active lock | `/tmp/gemini-chrome-autoinstall.active.lock/` | `%TEMP%\gemini-chrome-autoinstall.active.lock\` |
+| Pending flag | `~/.gemini-chrome-autoinstall/pending` | `%USERPROFILE%\.gemini-chrome-autoinstall\pending` |
+| Patched version | `~/.gemini-chrome-autoinstall/patched-version.txt` | `%USERPROFILE%\.gemini-chrome-autoinstall\patched-version.txt` |
 
 ## CI/CD
 
@@ -55,5 +66,5 @@ Conventional Commits with emoji prefix: `🎉 feat:`, `🐛 fix:`, `♻️ refac
 
 ## Windows-specific: `patch.ps1` extra subcommands
 
-- `watch` — registry listener daemon (not in macOS version)
-- `scheduled` — task scheduler entry point with self-healing (restarts watch if dead)
+- `watch` — async registry listener daemon with 60s timeout for pending retry
+- `scheduled` — startup entry point: checks pending installs, then ensures watch daemon is running

@@ -10,12 +10,12 @@ $RunRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunRegName = "GeminiChromeAutoPatch"
 $ScriptPath = $PSScriptRoot
 $LogFile = Join-Path $env:LOCALAPPDATA "gemini-chrome-autoinstall.log"
-$LockFile = Join-Path $env:TEMP "gemini-chrome-autoinstall.lock"
 $ActiveLockDir = Join-Path $env:TEMP "gemini-chrome-autoinstall.active.lock"
-$VersionFile = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall\chrome-version.txt"
-$LockTimeout = 300   # 5 minutes
-$WaitInterval = 5    # seconds
-$MaxWait = 600       # 10 minutes
+$InstallDir = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall"
+$VersionFile = Join-Path $InstallDir "chrome-version.txt"
+$PendingFile = Join-Path $InstallDir "pending"
+$PatchedVersionFile = Join-Path $InstallDir "patched-version.txt"
+$RetryInterval = 60  # seconds
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
 
 function Write-Log {
@@ -24,19 +24,6 @@ function Write-Log {
     $line = "[$timestamp] $Message"
     Write-Host $line
     Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
-}
-
-function Test-Cooldown {
-    if (Test-Path $LockFile) {
-        $lockTime = (Get-Item $LockFile).LastWriteTime
-        $age = [int](New-TimeSpan -Start $lockTime -End (Get-Date)).TotalSeconds
-        if ($age -lt $LockTimeout) {
-            Write-Log "Skipped: last run was ${age}s ago (< ${LockTimeout}s)."
-            return $false
-        }
-    }
-
-    return $true
 }
 
 function Enter-ActiveLock {
@@ -82,21 +69,6 @@ function Exit-ActiveLock {
     Remove-Item -Path $ActiveLockDir -Force -Recurse -ErrorAction SilentlyContinue
 }
 
-function Wait-ForChromeToExit {
-    $waited = 0
-    while (Get-Process chrome -ErrorAction SilentlyContinue) {
-        if ($waited -ge $MaxWait) {
-            Write-Log "Timeout: Chrome still running after ${MaxWait}s. Aborting."
-            return $false
-        }
-        Write-Log "Chrome is running. Waiting... (${waited}s / ${MaxWait}s)"
-        Start-Sleep -Seconds $WaitInterval
-        $waited += $WaitInterval
-    }
-
-    return $true
-}
-
 function Invoke-CoreInstall {
     Write-Log "Chrome is closed. Running Gemini-in-Chrome install script..."
     try {
@@ -107,6 +79,103 @@ function Invoke-CoreInstall {
     catch {
         Write-Log "Install failed: $_"
         return $false
+    }
+}
+
+function Get-ChromeRegistryVersion {
+    try {
+        $regPath = "HKCU:\Software\Google\Chrome\BLBeacon"
+        return (Get-ItemProperty -Path $regPath -Name "version" -ErrorAction Stop).version
+    }
+    catch {
+        return $null
+    }
+}
+
+function Save-ChromeVersion {
+    param([string]$Version)
+    $dir = Split-Path $VersionFile -Parent
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Set-Content -Path $VersionFile -Value $Version -NoNewline
+}
+
+function Get-SavedChromeVersion {
+    if (Test-Path $VersionFile) {
+        return (Get-Content $VersionFile -Raw).Trim()
+    }
+    return $null
+}
+
+function Get-PatchedVersion {
+    if (Test-Path $PatchedVersionFile) {
+        return (Get-Content $PatchedVersionFile -Raw).Trim()
+    }
+    return $null
+}
+
+function Save-PatchedVersion {
+    param([string]$Version)
+    $dir = Split-Path $PatchedVersionFile -Parent
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Set-Content -Path $PatchedVersionFile -Value $Version -NoNewline
+}
+
+function Test-NeedsPatch {
+    $chromeVer = Get-ChromeRegistryVersion
+    if (-not $chromeVer) {
+        Write-Log "Cannot read Chrome version. Skipping."
+        return $false
+    }
+    $patchedVer = Get-PatchedVersion
+    if ($chromeVer -eq $patchedVer) {
+        Write-Log "Already patched for Chrome $chromeVer. Skipping."
+        return $false
+    }
+    return $true
+}
+
+function Set-Pending {
+    $dir = Split-Path $PendingFile -Parent
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Get-ChromeRegistryVersion | Set-Content -Path $PendingFile -NoNewline
+    Write-Log "Chrome is running. Created pending flag for deferred install."
+}
+
+function Remove-Pending {
+    Remove-Item -Path $PendingFile -Force -ErrorAction SilentlyContinue
+}
+
+function Test-Pending {
+    return (Test-Path $PendingFile)
+}
+
+function Invoke-PendingInstall {
+    if (-not (Test-Pending)) { return }
+    if (Get-Process chrome -ErrorAction SilentlyContinue) { return }
+    if (-not (Test-NeedsPatch)) {
+        Write-Log "Retry: no longer needs patching. Clearing pending."
+        Remove-Pending
+        return
+    }
+
+    Write-Log "Retry: pending install found, Chrome is closed. Installing."
+    if (-not (Enter-ActiveLock)) { return }
+
+    try {
+        if (Invoke-CoreInstall) {
+            Save-PatchedVersion (Get-ChromeRegistryVersion)
+            Remove-Pending
+            Write-Log "Retry: install completed successfully."
+        }
+    }
+    finally {
+        Exit-ActiveLock
     }
 }
 
@@ -169,66 +238,44 @@ function Invoke-Status {
 
     $runEntry = Get-ItemProperty -Path $RunRegPath -Name $RunRegName -ErrorAction SilentlyContinue
     if ($runEntry) {
-        Write-Host "  Startup:   REGISTERED (Registry Run key)"
+        Write-Host "  Startup:      REGISTERED (Registry Run key)"
     } else {
-        Write-Host "  Startup:   NOT REGISTERED"
+        Write-Host "  Startup:      NOT REGISTERED"
     }
 
     $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
     if ($watchProcs) {
-        Write-Host "  Watcher:   RUNNING (PID $($watchProcs[0].ProcessId))"
+        Write-Host "  Watcher:      RUNNING (PID $($watchProcs[0].ProcessId))"
     } else {
-        Write-Host "  Watcher:   not running"
+        Write-Host "  Watcher:      not running"
     }
 
-    if (Get-Process chrome -ErrorAction SilentlyContinue) {
-        Write-Host "  Chrome:    RUNNING"
-    }
-    else {
-        Write-Host "  Chrome:    not running"
-    }
+    $chromeVer = Get-ChromeRegistryVersion
+    $patchedVer = Get-PatchedVersion
+    Write-Host "  Chrome ver:   $( if ($chromeVer) { $chromeVer } else { '(not found)' } )"
+    Write-Host "  Patched ver:  $( if ($patchedVer) { $patchedVer } else { 'never' } )"
 
-    $savedVer = Get-SavedChromeVersion
-    $regVer = Get-ChromeRegistryVersion
-    if ($savedVer) {
-        Write-Host "  Saved ver: $savedVer"
+    if (Test-Pending) {
+        Write-Host "  Pending:      YES (waiting for Chrome to close)"
     } else {
-        Write-Host "  Saved ver: (none)"
-    }
-    if ($regVer) {
-        Write-Host "  Reg ver:   $regVer"
-    } else {
-        Write-Host "  Reg ver:   (not found)"
+        Write-Host "  Pending:      no"
     }
 
     if (Test-Path $ActiveLockDir) {
-        Write-Host "  Running:   YES (patch is currently in progress)"
-    }
-    else {
-        Write-Host "  Running:   no"
-    }
-
-    if (Test-Path $LockFile) {
-        $lockTime = (Get-Item $LockFile).LastWriteTime
-        $age = [int](New-TimeSpan -Start $lockTime -End (Get-Date)).TotalSeconds
-        Write-Host "  Last run:  ${age}s ago"
-    }
-    else {
-        Write-Host "  Last run:  never"
+        Write-Host "  Running:      YES (patch in progress)"
+    } else {
+        Write-Host "  Running:      no"
     }
 
-    Write-Host "  Log:       $LogFile"
+    Write-Host "  Log:          $LogFile"
 }
 
 function Invoke-Uninstall {
     Invoke-Disable
-    Remove-Item -Path $LockFile -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $ActiveLockDir -Force -Recurse -ErrorAction SilentlyContinue
-    Remove-Item -Path $VersionFile -Force -ErrorAction SilentlyContinue
-    $installDir = Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall"
-    if (Test-Path $installDir) {
-        Remove-Item -Path $installDir -Recurse -Force
+    if (Test-Path $InstallDir) {
+        Remove-Item -Path $InstallDir -Recurse -Force
     }
     Write-Log "Uninstalled: all files removed."
     Write-Host "Done. gemini-chrome-autoinstall has been completely removed."
@@ -237,7 +284,7 @@ function Invoke-Uninstall {
 function Invoke-Run {
     Write-Log "Run triggered."
 
-    if (-not (Test-Cooldown)) {
+    if (-not (Test-NeedsPatch)) {
         return $false
     }
 
@@ -246,12 +293,17 @@ function Invoke-Run {
     }
 
     try {
-        if (-not (Wait-ForChromeToExit)) {
+        if (Get-Process chrome -ErrorAction SilentlyContinue) {
+            Set-Pending
             return $false
         }
 
-        New-Item -Path $LockFile -ItemType File -Force | Out-Null
-        return (Invoke-CoreInstall)
+        $success = Invoke-CoreInstall
+        if ($success) {
+            Save-PatchedVersion (Get-ChromeRegistryVersion)
+            Remove-Pending
+        }
+        return $success
     }
     finally {
         Exit-ActiveLock
@@ -266,9 +318,14 @@ function Invoke-Manual {
         if ($response -eq 'Y' -or $response -eq 'y') {
             Write-Log "Closing Chrome (user confirmed)..."
             Stop-Process -Name "chrome" -Force -ErrorAction SilentlyContinue
-            if (-not (Wait-ForChromeToExit)) {
-                Write-Host "Chrome did not exit in time. Please close it manually and retry."
-                return
+            $waited = 0
+            while (Get-Process chrome -ErrorAction SilentlyContinue) {
+                if ($waited -ge 30) {
+                    Write-Host "Chrome did not exit in time. Please close it manually and retry."
+                    return
+                }
+                Start-Sleep -Seconds 2
+                $waited += 2
             }
         } else {
             Write-Host "Cancelled."
@@ -281,8 +338,11 @@ function Invoke-Manual {
     }
 
     try {
-        New-Item -Path $LockFile -ItemType File -Force | Out-Null
         $success = Invoke-CoreInstall
+        if ($success) {
+            Save-PatchedVersion (Get-ChromeRegistryVersion)
+            Remove-Pending
+        }
     }
     finally {
         Exit-ActiveLock
@@ -292,32 +352,6 @@ function Invoke-Manual {
         Write-Log "Reopening Chrome..."
         Start-Process "chrome"
     }
-}
-
-function Get-ChromeRegistryVersion {
-    try {
-        $regPath = "HKCU:\Software\Google\Chrome\BLBeacon"
-        return (Get-ItemProperty -Path $regPath -Name "version" -ErrorAction Stop).version
-    }
-    catch {
-        return $null
-    }
-}
-
-function Save-ChromeVersion {
-    param([string]$Version)
-    $dir = Split-Path $VersionFile -Parent
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    }
-    Set-Content -Path $VersionFile -Value $Version -NoNewline
-}
-
-function Get-SavedChromeVersion {
-    if (Test-Path $VersionFile) {
-        return (Get-Content $VersionFile -Raw).Trim()
-    }
-    return $null
 }
 
 function Invoke-Watch {
@@ -334,7 +368,7 @@ function Invoke-Watch {
     }
     Write-Log "Watch: current Chrome version = $currentVersion"
 
-    # P/Invoke for RegNotifyChangeKeyValue
+    # P/Invoke for async RegNotifyChangeKeyValue
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -343,6 +377,8 @@ public class RegistryWatcher {
     public const int HKEY_CURRENT_USER = unchecked((int)0x80000001);
     public const int KEY_NOTIFY = 0x0010;
     public const int REG_NOTIFY_CHANGE_LAST_SET = 0x00000004;
+    public const int WAIT_OBJECT_0 = 0x00000000;
+    public const int WAIT_TIMEOUT = 0x00000102;
 
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern int RegOpenKeyEx(
@@ -354,8 +390,28 @@ public class RegistryWatcher {
 
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern int RegCloseKey(IntPtr hKey);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr CreateEvent(IntPtr lpEventAttributes, bool bManualReset, bool bInitialState, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern int WaitForSingleObject(IntPtr hHandle, int dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ResetEvent(IntPtr hEvent);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr hObject);
 }
 "@ -ErrorAction SilentlyContinue
+
+    $hEvent = [RegistryWatcher]::CreateEvent([IntPtr]::Zero, $true, $false, $null)
+    if ($hEvent -eq [IntPtr]::Zero) {
+        Write-Log "Watch: failed to create event. Exiting."
+        return
+    }
 
     $hKey = [IntPtr]::Zero
     $result = [RegistryWatcher]::RegOpenKeyEx(
@@ -368,16 +424,17 @@ public class RegistryWatcher {
 
     if ($result -ne 0) {
         Write-Log "Watch: failed to open registry key (error $result). Exiting."
+        [RegistryWatcher]::CloseHandle($hEvent) | Out-Null
         return
     }
 
     try {
         while ($true) {
-            # Block until a value changes
+            # Register async notification
             $notifyResult = [RegistryWatcher]::RegNotifyChangeKeyValue(
                 $hKey, $false,
                 [RegistryWatcher]::REG_NOTIFY_CHANGE_LAST_SET,
-                [IntPtr]::Zero, $false
+                $hEvent, $true
             )
 
             if ($notifyResult -ne 0) {
@@ -385,17 +442,47 @@ public class RegistryWatcher {
                 break
             }
 
-            $newVersion = Get-ChromeRegistryVersion
-            $savedVersion = Get-SavedChromeVersion
+            # Wait with timeout for pending retry
+            $timeoutMs = $RetryInterval * 1000
+            $waitResult = [RegistryWatcher]::WaitForSingleObject($hEvent, $timeoutMs)
 
-            if ($newVersion -and $newVersion -ne $savedVersion) {
-                Write-Log "Watch: Chrome version changed ($savedVersion -> $newVersion). Triggering patch."
-                if (Invoke-Run) {
+            if ($waitResult -eq [RegistryWatcher]::WAIT_OBJECT_0) {
+                # Registry changed
+                [RegistryWatcher]::ResetEvent($hEvent) | Out-Null
+
+                $newVersion = Get-ChromeRegistryVersion
+                $savedVersion = Get-SavedChromeVersion
+
+                if ($newVersion -and $newVersion -ne $savedVersion) {
+                    Write-Log "Watch: Chrome version changed ($savedVersion -> $newVersion). Triggering patch."
                     Save-ChromeVersion $newVersion
+
+                    if (Test-NeedsPatch) {
+                        if (Get-Process chrome -ErrorAction SilentlyContinue) {
+                            Set-Pending
+                        } else {
+                            if (Enter-ActiveLock) {
+                                try {
+                                    if (Invoke-CoreInstall) {
+                                        Save-PatchedVersion $newVersion
+                                        Remove-Pending
+                                    }
+                                } finally {
+                                    Exit-ActiveLock
+                                }
+                            }
+                        }
+                    }
                 }
+            } elseif ($waitResult -eq [RegistryWatcher]::WAIT_TIMEOUT) {
+                # Timeout — check for pending install
+                Invoke-PendingInstall
+            } else {
+                Write-Log "Watch: WaitForSingleObject failed ($waitResult). Exiting."
+                break
             }
 
-            # Re-register: must close and reopen the key for next notification
+            # Re-register: close and reopen key
             [RegistryWatcher]::RegCloseKey($hKey) | Out-Null
             $hKey = [IntPtr]::Zero
             $result = [RegistryWatcher]::RegOpenKeyEx(
@@ -415,12 +502,18 @@ public class RegistryWatcher {
         if ($hKey -ne [IntPtr]::Zero) {
             [RegistryWatcher]::RegCloseKey($hKey) | Out-Null
         }
+        if ($hEvent -ne [IntPtr]::Zero) {
+            [RegistryWatcher]::CloseHandle($hEvent) | Out-Null
+        }
         Write-Log "Watch stopped."
     }
 }
 
 function Invoke-Scheduled {
     Write-Log "Scheduled entry triggered."
+
+    # Attempt pending install on startup (Chrome may be closed now)
+    Invoke-PendingInstall
 
     # Ensure watch process is running
     $watchRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
@@ -454,7 +547,7 @@ switch ($Command) {
         Write-Host "  disable     Remove startup entry and stop watcher"
         Write-Host "  uninstall   Disable and remove all installed files"
         Write-Host "  status      Show current status (incl. watcher and versions)"
-        Write-Host "  run         Execute the patch (waits for Chrome to close)"
+        Write-Host "  run         Execute the patch (creates pending if Chrome is running)"
         Write-Host "  manual      Re-install immediately (offers to close Chrome)"
         Write-Host "  watch       Start registry watcher (runs as background daemon)"
     }

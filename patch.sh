@@ -5,34 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 BOOT_LABEL="com.gemini-chrome-autoinstall.boot"
 WATCHER_LABEL="com.gemini-chrome-autoinstall.watcher"
+RETRY_LABEL="com.gemini-chrome-autoinstall.retry"
 BOOT_PLIST="$BOOT_LABEL.plist"
 WATCHER_PLIST="$WATCHER_LABEL.plist"
-COOLDOWN_FILE="/tmp/gemini-chrome-autoinstall.lock"
+RETRY_PLIST="$RETRY_LABEL.plist"
+INSTALL_DIR="$HOME/.gemini-chrome-autoinstall"
+PENDING_FILE="$INSTALL_DIR/pending"
+PATCHED_VERSION_FILE="$INSTALL_DIR/patched-version.txt"
 ACTIVE_LOCK_DIR="/tmp/gemini-chrome-autoinstall.active.lock"
 LOG_FILE="$HOME/Library/Logs/gemini-chrome-autoinstall.log"
-LOCK_TIMEOUT=300  # 5 minutes
-WAIT_INTERVAL=5   # seconds
-MAX_WAIT=600      # 10 minutes
 CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh"
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-check_cooldown() {
-    if [ -f "$COOLDOWN_FILE" ]; then
-        local lock_time
-        lock_time=$(stat -f %m "$COOLDOWN_FILE" 2>/dev/null || echo 0)
-        local now
-        now=$(date +%s)
-        local age=$(( now - lock_time ))
-        if [ "$age" -lt "$LOCK_TIMEOUT" ]; then
-            log "Skipped: last run was ${age}s ago (< ${LOCK_TIMEOUT}s)."
-            return 1
-        fi
-    fi
-
-    return 0
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
 }
 
 acquire_active_lock() {
@@ -65,7 +50,6 @@ acquire_active_lock() {
     fi
 
     log "Skipped: another run is already in progress."
-    echo "Another run is already in progress."
     return 1
 }
 
@@ -82,19 +66,6 @@ disarm_active_lock_cleanup() {
     trap - INT TERM EXIT
 }
 
-wait_for_chrome_to_close() {
-    local waited=0
-    while pgrep -x "Google Chrome" >/dev/null 2>&1; do
-        if [ "$waited" -ge "$MAX_WAIT" ]; then
-            log "Timeout: Chrome still running after ${MAX_WAIT}s. Aborting."
-            return 1
-        fi
-        log "Chrome is running. Waiting... (${waited}s / ${MAX_WAIT}s)"
-        sleep "$WAIT_INTERVAL"
-        waited=$(( waited + WAIT_INTERVAL ))
-    done
-}
-
 run_core_install() {
     log "Chrome is closed. Running Gemini-in-Chrome install script..."
     if curl -fsSL "$CORE_INSTALL_URL" | bash; then
@@ -105,12 +76,53 @@ run_core_install() {
     fi
 }
 
+get_chrome_version() {
+    /usr/libexec/PlistBuddy -c "Print :KSVersion" \
+        "/Applications/Google Chrome.app/Contents/Info.plist" 2>/dev/null
+}
+
+get_patched_version() {
+    cat "$PATCHED_VERSION_FILE" 2>/dev/null || true
+}
+
+save_patched_version() {
+    mkdir -p "$(dirname "$PATCHED_VERSION_FILE")"
+    printf '%s' "$1" > "$PATCHED_VERSION_FILE"
+}
+
+needs_patch() {
+    local chrome_ver
+    chrome_ver=$(get_chrome_version)
+    if [ -z "$chrome_ver" ]; then
+        log "Cannot read Chrome version. Skipping."
+        return 1
+    fi
+    local patched_ver
+    patched_ver=$(get_patched_version)
+    if [ "$chrome_ver" = "$patched_ver" ]; then
+        log "Already patched for Chrome $chrome_ver. Skipping."
+        return 1
+    fi
+    return 0
+}
+
+create_pending() {
+    mkdir -p "$(dirname "$PENDING_FILE")"
+    get_chrome_version > "$PENDING_FILE"
+    log "Chrome is running. Created pending flag for deferred install."
+}
+
+remove_pending() {
+    rm -f "$PENDING_FILE"
+}
+
 cmd_enable() {
     mkdir -p "$LAUNCH_AGENTS_DIR"
 
     # Unload existing agents first (idempotent re-install)
     launchctl unload "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" 2>/dev/null || true
     launchctl unload "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST" 2>/dev/null || true
+    launchctl unload "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" 2>/dev/null || true
 
     cat > "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -126,8 +138,6 @@ cmd_enable() {
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
-	<key>StandardOutPath</key>
-	<string>${LOG_FILE}</string>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -150,8 +160,34 @@ EOF
 	<array>
 		<string>/Applications/Google Chrome.app/Contents/Info.plist</string>
 	</array>
-	<key>StandardOutPath</key>
+	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
+</dict>
+</plist>
+EOF
+
+    cat > "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${RETRY_LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${SCRIPT_DIR}/patch.sh</string>
+		<string>retry</string>
+	</array>
+	<key>KeepAlive</key>
+	<dict>
+		<key>PathState</key>
+		<dict>
+			<key>${HOME}/.gemini-chrome-autoinstall/pending</key>
+			<true/>
+		</dict>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -160,9 +196,10 @@ EOF
 
     launchctl load "$LAUNCH_AGENTS_DIR/$BOOT_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST"
+    launchctl load "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
 
-    log "Enabled: both LaunchAgents loaded."
-    echo "Done. Both LaunchAgents are now enabled."
+    log "Enabled: all LaunchAgents loaded."
+    echo "Done. All LaunchAgents are now enabled."
 }
 
 cmd_disable() {
@@ -176,69 +213,64 @@ cmd_disable() {
         rm -f "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST"
     fi
 
-    log "Disabled: both LaunchAgents unloaded and removed."
-    echo "Done. Both LaunchAgents are now disabled."
+    if [ -f "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" ]; then
+        launchctl unload "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" 2>/dev/null || true
+        rm -f "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
+    fi
+
+    log "Disabled: all LaunchAgents unloaded and removed."
+    echo "Done. All LaunchAgents are now disabled."
 }
 
 cmd_status() {
     echo "=== Gemini Chrome AutoInstall Status ==="
 
+    local agent_list
+    agent_list=$(launchctl list 2>/dev/null || true)
+
     local boot_loaded=false
     local watcher_loaded=false
+    local retry_loaded=false
 
-    if launchctl list 2>/dev/null | grep -q "$BOOT_LABEL"; then
+    if echo "$agent_list" | grep -q "$BOOT_LABEL"; then
         boot_loaded=true
     fi
-    if launchctl list 2>/dev/null | grep -q "$WATCHER_LABEL"; then
+    if echo "$agent_list" | grep -q "$WATCHER_LABEL"; then
         watcher_loaded=true
     fi
-
-    if $boot_loaded; then
-        echo "  Boot agent:    LOADED"
-    else
-        echo "  Boot agent:    NOT LOADED"
+    if echo "$agent_list" | grep -q "$RETRY_LABEL"; then
+        retry_loaded=true
     fi
 
-    if $watcher_loaded; then
-        echo "  Watcher agent: LOADED"
-    else
-        echo "  Watcher agent: NOT LOADED"
-    fi
+    echo "  Boot agent:    $( $boot_loaded && echo LOADED || echo 'NOT LOADED' )"
+    echo "  Watcher agent: $( $watcher_loaded && echo LOADED || echo 'NOT LOADED' )"
+    echo "  Retry agent:   $( $retry_loaded && echo LOADED || echo 'NOT LOADED' )"
 
-    if [ -f "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" ]; then
-        echo "  Boot plist:    INSTALLED"
-    else
-        echo "  Boot plist:    NOT INSTALLED"
-    fi
+    local chrome_ver
+    chrome_ver=$(get_chrome_version)
+    local patched_ver
+    patched_ver=$(get_patched_version)
+    echo "  Chrome ver:    ${chrome_ver:-unknown}"
+    echo "  Patched ver:   ${patched_ver:-never}"
 
-    if [ -f "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST" ]; then
-        echo "  Watcher plist: INSTALLED"
+    if [ -f "$PENDING_FILE" ]; then
+        echo "  Pending:       YES (waiting for Chrome to close)"
     else
-        echo "  Watcher plist: NOT INSTALLED"
+        echo "  Pending:       no"
     fi
 
     if [ -d "$ACTIVE_LOCK_DIR" ]; then
-        echo "  Running:       YES (patch is currently in progress)"
+        echo "  Running:       YES (patch in progress)"
     else
         echo "  Running:       no"
     fi
 
-    if [ -f "$COOLDOWN_FILE" ]; then
-        local lock_time
-        lock_time=$(stat -f %m "$COOLDOWN_FILE" 2>/dev/null || echo 0)
-        local now
-        now=$(date +%s)
-        local age=$(( now - lock_time ))
-        echo "  Last run:      ${age}s ago"
-    else
-        echo "  Last run:      never"
-    fi
+    return 0
 }
 
 cmd_uninstall() {
     cmd_disable
-    rm -f "$COOLDOWN_FILE"
-    rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || true
+    rm -rf "$ACTIVE_LOCK_DIR" 2>/dev/null || true
     rm -rf "$HOME/.gemini-chrome-autoinstall"
     log "Uninstalled: all files removed."
     echo "Done. gemini-chrome-autoinstall has been completely removed."
@@ -247,24 +279,62 @@ cmd_uninstall() {
 cmd_run() {
     log "Run triggered."
 
-    if ! check_cooldown; then
+    if ! needs_patch; then
         return 0
     fi
 
     if ! acquire_active_lock; then
         return 0
     fi
-
     arm_active_lock_cleanup
 
     local status=0
-    if ! wait_for_chrome_to_close; then
-        status=1
+    if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+        create_pending
     else
-        touch "$COOLDOWN_FILE"
-        if ! run_core_install; then
+        if run_core_install; then
+            save_patched_version "$(get_chrome_version)"
+            remove_pending
+        else
             status=1
         fi
+    fi
+
+    disarm_active_lock_cleanup
+    release_active_lock
+    return $status
+}
+
+cmd_retry() {
+    if [ ! -f "$PENDING_FILE" ]; then
+        return 0
+    fi
+
+    log "Retry: pending install found."
+
+    if ! needs_patch; then
+        log "Retry: no longer needs patching. Clearing pending."
+        remove_pending
+        return 0
+    fi
+
+    if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+        log "Retry: Chrome still running. Will retry later."
+        return 0
+    fi
+
+    if ! acquire_active_lock; then
+        return 0
+    fi
+    arm_active_lock_cleanup
+
+    local status=0
+    if run_core_install; then
+        save_patched_version "$(get_chrome_version)"
+        remove_pending
+        log "Retry: install completed successfully."
+    else
+        status=1
     fi
 
     disarm_active_lock_cleanup
@@ -281,10 +351,15 @@ cmd_manual() {
         if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
             log "Closing Chrome (user confirmed)..."
             killall "Google Chrome" 2>/dev/null
-            if ! wait_for_chrome_to_close; then
-                echo "Chrome did not exit in time. Please close it manually and retry."
-                return 1
-            fi
+            local waited=0
+            while pgrep -x "Google Chrome" >/dev/null 2>&1; do
+                if [ "$waited" -ge 30 ]; then
+                    echo "Chrome did not exit in time. Please close it manually and retry."
+                    return 1
+                fi
+                sleep 2
+                waited=$(( waited + 2 ))
+            done
         else
             echo "Cancelled."
             return 0
@@ -294,12 +369,13 @@ cmd_manual() {
     if ! acquire_active_lock; then
         return 0
     fi
-
     arm_active_lock_cleanup
 
-    touch "$COOLDOWN_FILE"
     local status=0
-    if ! run_core_install; then
+    if run_core_install; then
+        save_patched_version "$(get_chrome_version)"
+        remove_pending
+    else
         status=1
     fi
 
@@ -321,16 +397,18 @@ case "${1:-help}" in
     uninstall) cmd_uninstall ;;
     status)    cmd_status ;;
     run)       cmd_run ;;
+    retry)     cmd_retry ;;
     manual)    cmd_manual ;;
     *)
-        echo "Usage: $0 {enable|disable|uninstall|status|run|manual}"
+        echo "Usage: $0 {enable|disable|uninstall|status|run|retry|manual}"
         echo ""
         echo "Commands:"
         echo "  enable      Install and load LaunchAgents"
         echo "  disable     Unload and remove LaunchAgents"
         echo "  uninstall   Disable and remove all installed files"
         echo "  status      Show current status"
-        echo "  run         Execute the patch (waits for Chrome to close)"
+        echo "  run         Execute the patch (creates pending if Chrome is running)"
+        echo "  retry       Retry pending install (called by KeepAlive agent)"
         echo "  manual      Re-install immediately after you close Chrome"
         exit 1
         ;;

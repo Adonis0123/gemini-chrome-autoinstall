@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-03-26
+
+### Bug Fixes
+
+- *(trigger)* Replace cooldown with version-based skip and pending-retry mechanism([af0c9b4](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/af0c9b41e79dcc36371ef99b9e9e7ce3f5b47ae9))
 ## [0.1.2] - 2026-03-18
 
 ### Bug Fixes

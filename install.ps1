@@ -75,20 +75,20 @@ if (-not $SkipFirstPatch) {
 $fixFunc = 'function gemini-chrome-fix { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual }'
 $statusFunc = 'function gemini-chrome-status { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status }'
 
-if (!(Test-Path $profilePath)) {
-    New-Item -ItemType File -Path $profilePath -Force | Out-Null
+if (!(Test-Path $ProfilePath)) {
+    New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
 }
 
-$profileContent = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+$profileContent = Get-Content $ProfilePath -Raw -ErrorAction SilentlyContinue
 if (!$profileContent) { $profileContent = "" }
 
 $changed = $false
 if ($profileContent -notmatch 'function gemini-chrome-fix') {
-    Add-Content $profilePath "`n$fixFunc"
+    Add-Content $ProfilePath "`n$fixFunc"
     $changed = $true
 }
 if ($profileContent -notmatch 'function gemini-chrome-status') {
-    Add-Content $profilePath "`n$statusFunc"
+    Add-Content $ProfilePath "`n$statusFunc"
     $changed = $true
 }
 

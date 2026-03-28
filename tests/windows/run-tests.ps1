@@ -270,6 +270,30 @@ try {
     Assert-FileContains (Join-Path $unknownRuntimeRoot "last-result") "reason=missing_required_fields"
   } -CaseEnv $unknownEnv
 
+  $manualUnknownCaseRoot = Join-Path $RunRoot "manual-unknown-recovers"
+  $manualUnknownRuntimeRoot = Join-Path $manualUnknownCaseRoot "runtime"
+  $manualUnknownLocalStatePath = Join-Path $manualUnknownRuntimeRoot "Local State"
+  $manualUnknownEnv = @{
+    "USERPROFILE" = Join-Path $manualUnknownCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $manualUnknownCaseRoot "localappdata"
+    "TEMP" = Join-Path $manualUnknownCaseRoot "temp"
+    "TMP" = Join-Path $manualUnknownCaseRoot "temp"
+    "TMPDIR" = Join-Path $manualUnknownCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $manualUnknownRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = $manualUnknownLocalStatePath
+    "GEMINI_CORE_INSTALL_CMD" = "$RepoRoot\tests\helpers\fake-core-install.ps1"
+    "GEMINI_FAKE_INSTALL_MODE" = "success"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "manual-unknown-recovers" {
+    New-Item -ItemType Directory -Force -Path $manualUnknownRuntimeRoot | Out-Null
+    Copy-Item (Join-Path $FixtureDir "unknown-invalid.json") $manualUnknownLocalStatePath -Force
+    & "$RepoRoot\patch.ps1" manual | Out-Null
+    if (-not $?) { throw "patch.ps1 manual failed in manual-unknown-recovers" }
+    Assert-FileContains (Join-Path $manualUnknownRuntimeRoot "last-result") "status=healthy"
+  } -CaseEnv $manualUnknownEnv
+
   $blockedCaseRoot = Join-Path $RunRoot "chrome-running-creates-pending"
   $blockedRuntimeRoot = Join-Path $blockedCaseRoot "runtime"
   $blockedEnv = @{

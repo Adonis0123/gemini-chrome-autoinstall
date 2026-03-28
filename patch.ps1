@@ -361,8 +361,7 @@ function Get-PatchState {
 function Resolve-StateMapping {
     param(
         [string]$PatchState,
-        [bool]$HasPending,
-        [bool]$ChromeRunning
+        [bool]$HasPending
     )
 
     $resultStatus = switch ($PatchState) {
@@ -509,6 +508,7 @@ function Invoke-Reconcile {
     $patchState = Get-PatchState
     $chromeVersion = Get-ChromeVersionOrUnknown
     $script:NeedsPatchChromeVersion = $chromeVersion
+    Write-Log "Reconcile ($Trigger): detected state '$($patchState.state)' with reason '$($patchState.reason)'."
 
     switch ($patchState.state) {
         "healthy" {
@@ -520,13 +520,16 @@ function Invoke-Reconcile {
             return $true
         }
         "unknown" {
+            if ($Trigger -eq "manual") {
+                return (Invoke-PatchAndVerify -PatchReason $patchState.reason)
+            }
             Write-LastResult -Status "detect_error" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
             return $false
         }
         "drifted" {
             if (Test-IsChromeRunning) {
                 Upsert-PendingRecord -Reason "blocked" -PatchReason $patchState.reason
-                Write-LastResult -Status "blocked" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint "Chrome 关闭后将自动修复"
+                Write-LastResult -Status "blocked" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint "Will auto-fix after Chrome closes"
                 return $true
             }
             return (Invoke-PatchAndVerify -PatchReason $patchState.reason)
@@ -549,14 +552,14 @@ function Invoke-PendingInstall {
 
     if (Test-IsChromeRunning) {
         Upsert-PendingRecord -Reason "blocked" -PatchReason $pendingPatchReason
-        Write-LastResult -Status "blocked" -Reason $pendingPatchReason -ChromeVersion $script:NeedsPatchChromeVersion -Hint "Chrome 关闭后将自动修复"
+        Write-LastResult -Status "blocked" -Reason $pendingPatchReason -ChromeVersion $script:NeedsPatchChromeVersion -Hint "Will auto-fix after Chrome closes"
         return
     }
 
     $retryCount = Get-PendingRetryCount
     if (-not (Should-AttemptRetryNow -RetryCount $retryCount)) {
         Upsert-PendingRecord -Reason "backoff_wait" -PatchReason $pendingPatchReason
-        Write-LastResult -Status "blocked" -Reason "retry_backoff" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "等待下一次自动重试窗口"
+        Write-LastResult -Status "blocked" -Reason "retry_backoff" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "Waiting for next automatic retry window"
         Write-Log "Retry throttled by internal backoff (retry_count=$retryCount)."
         return
     }
@@ -644,8 +647,7 @@ function Invoke-Status {
 
     $patchState = Get-PatchState
     $hasPending = Test-Pending
-    $chromeRunning = Test-IsChromeRunning
-    $stateMapping = Resolve-StateMapping -PatchState $patchState.state -HasPending:$hasPending -ChromeRunning:$chromeRunning
+    $stateMapping = Resolve-StateMapping -PatchState $patchState.state -HasPending:$hasPending
 
     $pendingReason = Get-PendingField -Key "reason"
     if (-not $pendingReason) {

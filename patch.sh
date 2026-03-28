@@ -239,7 +239,8 @@ run_core_install() {
             log "Install completed successfully."
             return 0
         fi
-        log "Install failed with exit code $?."
+        local rc=$?
+        log "Install failed with exit code $rc."
         return 1
     fi
 
@@ -284,21 +285,47 @@ detect_patch_state() {
         fi
     fi
 
+    local parsed_fields
+    parsed_fields=$(python3 - "$LOCAL_STATE_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+variations_country = data.get("variations_country") or ""
+permanent_values = data.get("variations_permanent_consistency_country") or []
+permanent_country = permanent_values[-1] if isinstance(permanent_values, list) and permanent_values else ""
+
+has_true = False
+has_false = False
+info_cache = ((data.get("profile") or {}).get("info_cache") or {})
+if isinstance(info_cache, dict):
+    for profile_value in info_cache.values():
+        if isinstance(profile_value, dict) and "is_glic_eligible" in profile_value:
+            if profile_value["is_glic_eligible"] is True:
+                has_true = True
+            elif profile_value["is_glic_eligible"] is False:
+                has_false = True
+
+print(variations_country)
+print(permanent_country)
+print("1" if has_true else "0")
+print("1" if has_false else "0")
+PY
+)
+
     local variations_country
-    variations_country=$(sed -n 's/.*"variations_country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOCAL_STATE_FILE" | head -n 1)
+    variations_country=$(printf '%s\n' "$parsed_fields" | sed -n '1p')
 
     local permanent_country
-    permanent_country=$(sed -n 's/.*"variations_permanent_consistency_country"[[:space:]]*:[[:space:]]*\[[^]]*"\([^"]*\)"\][[:space:]]*.*/\1/p' "$LOCAL_STATE_FILE" | head -n 1)
+    permanent_country=$(printf '%s\n' "$parsed_fields" | sed -n '2p')
 
-    local has_glic_true="0"
-    if grep -Eq '"is_glic_eligible"[[:space:]]*:[[:space:]]*true' "$LOCAL_STATE_FILE"; then
-        has_glic_true="1"
-    fi
+    local has_glic_true
+    has_glic_true=$(printf '%s\n' "$parsed_fields" | sed -n '3p')
 
-    local has_glic_false="0"
-    if grep -Eq '"is_glic_eligible"[[:space:]]*:[[:space:]]*false' "$LOCAL_STATE_FILE"; then
-        has_glic_false="1"
-    fi
+    local has_glic_false
+    has_glic_false=$(printf '%s\n' "$parsed_fields" | sed -n '4p')
 
     if [ -z "$variations_country" ] || [ -z "$permanent_country" ] || { [ "$has_glic_true" = "0" ] && [ "$has_glic_false" = "0" ]; }; then
         echo "unknown|missing_required_fields"
@@ -457,7 +484,7 @@ reconcile_patch_state() {
         drifted)
             if is_chrome_running; then
                 upsert_pending_record "blocked" "$patch_reason"
-                write_last_result "blocked" "$patch_reason" "$chrome_ver" "Chrome 关闭后将自动修复"
+                write_last_result "blocked" "$patch_reason" "$chrome_ver" "Will auto-fix after Chrome closes"
                 return 0
             fi
             perform_patch_and_verify "$patch_reason"
@@ -704,7 +731,7 @@ cmd_retry() {
     if is_chrome_running; then
         upsert_pending_record "blocked" "$pending_patch_reason"
         log "Retry: Chrome still running. Will retry later."
-        write_last_result "blocked" "$pending_patch_reason" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "Chrome 关闭后将自动修复"
+        write_last_result "blocked" "$pending_patch_reason" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "Will auto-fix after Chrome closes"
         return 0
     fi
 
@@ -712,7 +739,7 @@ cmd_retry() {
     retry_count=$(get_pending_retry_count)
     if ! should_attempt_retry_now "$retry_count"; then
         upsert_pending_record "backoff_wait" "$pending_patch_reason"
-        write_last_result "blocked" "retry_backoff" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "等待下一次自动重试窗口"
+        write_last_result "blocked" "retry_backoff" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "Waiting for next automatic retry window"
         log "Retry throttled by internal backoff (retry_count=${retry_count})."
         return 0
     fi

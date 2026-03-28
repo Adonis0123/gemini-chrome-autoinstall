@@ -63,7 +63,11 @@ fi
 echo ""
 echo "Installation complete!"
 echo "The extension will be re-installed automatically after every Chrome update."
-echo "Tool version: $(tr -d '\n' < "$INSTALL_DIR/VERSION")"
+tool_version="unknown"
+if [ -s "$INSTALL_DIR/VERSION" ]; then
+    tool_version=$(tr -d '\n' < "$INSTALL_DIR/VERSION")
+fi
+echo "Tool version: $tool_version"
 echo ""
 echo "Useful commands:"
 echo "  Check status:  ~/.gemini-chrome-autoinstall/patch.sh status"

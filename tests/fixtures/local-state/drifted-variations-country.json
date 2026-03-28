@@ -1,0 +1,9 @@
+{
+  "variations_country": "cn",
+  "variations_permanent_consistency_country": ["seed", "us"],
+  "profile": {
+    "info_cache": {
+      "Default": { "is_glic_eligible": true }
+    }
+  }
+}

@@ -525,8 +525,30 @@ cmd_run() {
                 create_pending
                 write_last_result "pending" "chrome_running" "$chrome_ver" "close Chrome and wait for retry"
             else
-                remove_pending
-                write_last_result "$result_status" "$detect_reason" "$chrome_ver" "local state drifted"
+                if ! acquire_active_lock; then
+                    write_last_result "unknown" "active_lock_busy" "$chrome_ver" "another run in progress"
+                    return 0
+                fi
+                arm_active_lock_cleanup
+
+                local status=0
+                if run_core_install; then
+                    local installed_chrome_ver
+                    installed_chrome_ver=$(get_chrome_version)
+                    if [ -z "$installed_chrome_ver" ]; then
+                        installed_chrome_ver="$chrome_ver"
+                    fi
+                    save_patched_version "$installed_chrome_ver"
+                    remove_pending
+                    write_last_result "healthy" "patched" "$installed_chrome_ver" "patched successfully"
+                else
+                    status=1
+                    write_last_result "unknown" "core_install_failed" "$chrome_ver" "check core installer output"
+                fi
+
+                disarm_active_lock_cleanup
+                release_active_lock
+                return $status
             fi
             ;;
         *)
@@ -561,7 +583,6 @@ cmd_retry() {
         return 0
     fi
 
-    remove_pending
     cmd_run
 }
 

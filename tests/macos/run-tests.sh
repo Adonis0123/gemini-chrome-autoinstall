@@ -117,12 +117,14 @@ if run_case "tri-state-healthy" env \
 fi
 
 if run_case "tri-state-drifted-country" env \
-  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
-  GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/drifted-variations-country.json" \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime/tri-state-drifted-country" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/runtime/tri-state-drifted-country/local-state.json" \
+  GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+  GEMINI_FAKE_INSTALL_MODE="success" \
   GEMINI_CHROME_VERSION="136.0.7103.49" \
   GEMINI_CHROME_RUNNING="0" \
-  bash patch.sh run; then
-  assert_file_contains "$TMPDIR/runtime/last-result" "status=drifted"
+  bash -c "mkdir -p \"$TMPDIR/runtime/tri-state-drifted-country\" && cp \"$FIXTURE_DIR/drifted-variations-country.json\" \"$TMPDIR/runtime/tri-state-drifted-country/local-state.json\" && bash patch.sh run"; then
+  assert_file_contains "$TMPDIR/runtime/tri-state-drifted-country/last-result" "status=healthy"
 fi
 
 if run_case "tri-state-unknown-invalid-json" env \

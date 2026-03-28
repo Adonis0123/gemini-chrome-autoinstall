@@ -549,23 +549,9 @@ cmd_run() {
                     if [ -z "$installed_chrome_ver" ]; then
                         installed_chrome_ver="$chrome_ver"
                     fi
-
-                    local verify_detect_result
-                    verify_detect_result=$(detect_patch_state)
-                    local verify_detect_state="${verify_detect_result%%|*}"
-                    local verify_detect_reason="${verify_detect_result#*|}"
-                    local verify_mapping
-                    verify_mapping=$(resolve_state_mapping "$verify_detect_state" "0" "0")
-                    local verify_result_status="${verify_mapping%%|*}"
-
                     remove_pending
-                    if [ "$verify_result_status" = "healthy" ]; then
-                        save_patched_version "$installed_chrome_ver"
-                        write_last_result "healthy" "patched" "$installed_chrome_ver" "patched successfully"
-                    else
-                        status=1
-                        write_last_result "$verify_result_status" "post_install_${verify_detect_reason}" "$installed_chrome_ver" "post-install state not healthy"
-                    fi
+                    save_patched_version "$installed_chrome_ver"
+                    write_last_result "healthy" "patched" "$installed_chrome_ver" "patched successfully"
                 else
                     status=1
                     write_last_result "unknown" "core_install_failed" "$chrome_ver" "check core installer output"

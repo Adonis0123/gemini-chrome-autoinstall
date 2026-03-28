@@ -10,16 +10,32 @@ export TMPDIR="$TMP_ROOT"
 
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-TEST_CASE="${1:-}"
+TEST_CASES=("$@")
 FAILURES=0
 CASE_OUTPUT=""
 CASES_RUN=0
+
+should_run_case() {
+  local case_name="$1"
+  if [[ "${#TEST_CASES[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local requested
+  for requested in "${TEST_CASES[@]}"; do
+    if [[ "${requested}" == "${case_name}" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
 
 run_case() {
   local case_name="$1"
   shift
 
-  if [[ -n "${TEST_CASE}" && "${TEST_CASE}" != "${case_name}" ]]; then
+  if ! should_run_case "${case_name}"; then
     return 2
   fi
 
@@ -81,6 +97,15 @@ if run_case "status-shows-tool-version" env bash patch.sh status; then
   assert_contains "${CASE_OUTPUT}" "Tool version:"
 fi
 
+if run_case "install-prints-version" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/install" \
+  GEMINI_SKIP_ENABLE="1" \
+  GEMINI_SKIP_FIRST_PATCH="1" \
+  bash install.sh; then
+  assert_contains "${CASE_OUTPUT}" "Tool version: v"
+  assert_file_contains "$TMPDIR/install/VERSION" "v"
+fi
+
 TRI_STATE_RUNTIME_DIR="$TMP_ROOT/runtime/tri-state-healthy"
 if run_case "tri-state-healthy" env \
   GEMINI_INSTALL_DIR="$TRI_STATE_RUNTIME_DIR" \
@@ -91,10 +116,10 @@ if run_case "tri-state-healthy" env \
   assert_file_contains "$TRI_STATE_RUNTIME_DIR/last-result" "status=healthy"
 fi
 
-if [[ "${TEST_CASE}" != "" ]]; then
-  echo "[INFO] requested case: ${TEST_CASE}"
+if [[ "${#TEST_CASES[@]}" -gt 0 ]]; then
+  echo "[INFO] requested cases: ${TEST_CASES[*]}"
   if [[ "${CASES_RUN}" -eq 0 ]]; then
-    echo "[FAIL] unknown test case: ${TEST_CASE}"
+    echo "[FAIL] unknown test case(s): ${TEST_CASES[*]}"
     exit 1
   fi
 fi

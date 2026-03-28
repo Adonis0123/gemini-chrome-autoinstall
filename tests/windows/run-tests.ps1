@@ -5,9 +5,27 @@ param(
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..").Path
 $FixtureDir = Join-Path $RepoRoot "tests\fixtures\local-state"
 $RunRoot = Join-Path $env:TEMP ("gemini-chrome-autoinstall-tests-" + [guid]::NewGuid().ToString())
+$RequestedCases = @()
+if ($Case) {
+  $RequestedCases = @(
+    $Case.Split(",") |
+      ForEach-Object { $_.Trim() } |
+      Where-Object { $_ -ne "" }
+  )
+}
 
 $global:Failures = 0
 $global:CasesRun = 0
+
+function Should-RunCase {
+  param([string]$Name)
+
+  if ($RequestedCases.Count -eq 0) {
+    return $true
+  }
+
+  return $RequestedCases -contains $Name
+}
 
 function Invoke-Case {
   param(
@@ -16,7 +34,7 @@ function Invoke-Case {
     [hashtable]$CaseEnv = @{}
   )
 
-  if ($Case -and $Case -ne $Name) {
+  if (-not (Should-RunCase -Name $Name)) {
     return 2
   }
 
@@ -33,7 +51,10 @@ function Invoke-Case {
     "GEMINI_LOCAL_STATE_PATH",
     "GEMINI_CHROME_VERSION",
     "GEMINI_CHROME_RUNNING",
-    "GEMINI_FAKE_INSTALL_MODE"
+    "GEMINI_FAKE_INSTALL_MODE",
+    "GEMINI_PROFILE_PATH",
+    "GEMINI_SKIP_ENABLE",
+    "GEMINI_SKIP_FIRST_PATCH"
   )
 
   $originalEnv = @{}
@@ -125,6 +146,18 @@ function Assert-FileContains {
   }
 }
 
+function Assert-PathExists {
+  param([string]$Path)
+
+  if (Test-Path $Path) {
+    Write-Host "[PASS] path exists: $Path"
+  }
+  else {
+    Write-Host "[FAIL] missing path: $Path"
+    $global:Failures++
+  }
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 
@@ -140,6 +173,24 @@ try {
     $scriptOutput = & "$RepoRoot\patch.ps1" status | Out-String
     Assert-Contains $scriptOutput "Tool version:"
   } -CaseEnv $statusEnv
+
+  $installCaseRoot = Join-Path $RunRoot "install-prints-version"
+  $installEnv = @{
+    "USERPROFILE" = Join-Path $installCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $installCaseRoot "localappdata"
+    "TEMP" = Join-Path $installCaseRoot "temp"
+    "TMP" = Join-Path $installCaseRoot "temp"
+    "TMPDIR" = Join-Path $installCaseRoot "temp"
+  }
+  Invoke-Case "install-prints-version" {
+    $env:GEMINI_INSTALL_DIR = "$RunRoot\install"
+    $env:GEMINI_PROFILE_PATH = "$RunRoot\profile.ps1"
+    $env:GEMINI_SKIP_ENABLE = "1"
+    $env:GEMINI_SKIP_FIRST_PATCH = "1"
+    $output = & "$RepoRoot\install.ps1" | Out-String
+    Assert-Contains $output "Tool version: v"
+    Assert-PathExists "$RunRoot\install\VERSION"
+  } -CaseEnv $installEnv
 
   $triCaseRoot = Join-Path $RunRoot "tri-state-healthy"
   $triRuntimeRoot = Join-Path $triCaseRoot "runtime"
@@ -161,8 +212,8 @@ try {
     Assert-FileContains (Join-Path $triRuntimeRoot "last-result") "status=healthy"
   } -CaseEnv $triEnv
 
-  if ($Case -and $CasesRun -eq 0) {
-    Write-Host "[FAIL] unknown test case: $Case"
+  if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
+    Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"
     exit 1
   }
 

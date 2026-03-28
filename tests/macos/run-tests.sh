@@ -127,6 +127,18 @@ if run_case "tri-state-drifted-country" env \
   assert_file_contains "$TMPDIR/runtime/tri-state-drifted-country/last-result" "status=healthy"
 fi
 
+if run_case "tri-state-post-install-verify-fail" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime/tri-state-post-install-verify-fail" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/runtime/tri-state-post-install-verify-fail/local-state.json" \
+  GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+  GEMINI_FAKE_INSTALL_MODE="verify_fail" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash -c "mkdir -p \"$TMPDIR/runtime/tri-state-post-install-verify-fail\" && cp \"$FIXTURE_DIR/drifted-variations-country.json\" \"$TMPDIR/runtime/tri-state-post-install-verify-fail/local-state.json\" && bash patch.sh run || true"; then
+  assert_file_contains "$TMPDIR/runtime/tri-state-post-install-verify-fail/last-result" "status=drifted"
+  assert_file_contains "$TMPDIR/runtime/tri-state-post-install-verify-fail/last-result" "reason=post_install_glic_not_eligible"
+fi
+
 if run_case "tri-state-unknown-invalid-json" env \
   GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
   GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/unknown-invalid.json" \

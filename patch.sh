@@ -277,13 +277,30 @@ detect_patch_state() {
     fi
 }
 
-map_detect_state_to_result_status() {
+resolve_state_mapping() {
     local detect_state="$1"
+    local has_pending="$2"
+    local chrome_running="$3"
+
+    local result_status
     case "$detect_state" in
-        healthy) echo "healthy" ;;
-        drifted) echo "drifted" ;;
-        *) echo "detect_error" ;;
+        healthy) result_status="healthy" ;;
+        drifted) result_status="drifted" ;;
+        *) result_status="detect_error" ;;
     esac
+
+    local current_state
+    if [ "$has_pending" = "1" ]; then
+        current_state="pending"
+    elif [ "$detect_state" = "healthy" ]; then
+        current_state="healthy"
+    elif [ "$detect_state" = "drifted" ] && [ "$chrome_running" = "0" ]; then
+        current_state="drifted"
+    else
+        current_state="unknown"
+    fi
+
+    echo "${result_status}|${current_state}"
 }
 
 get_patched_version() {
@@ -438,26 +455,19 @@ cmd_status() {
     detect_result=$(detect_patch_state)
     local detect_state="${detect_result%%|*}"
 
-    local current_state="unknown"
+    local has_pending="0"
     if [ -f "$PENDING_FILE" ]; then
-        current_state="pending"
-    else
-        case "$detect_state" in
-            healthy)
-                current_state="healthy"
-                ;;
-            drifted)
-                if is_chrome_running; then
-                    current_state="unknown"
-                else
-                    current_state="drifted"
-                fi
-                ;;
-            *)
-                current_state="unknown"
-                ;;
-        esac
+        has_pending="1"
     fi
+
+    local chrome_running="0"
+    if is_chrome_running; then
+        chrome_running="1"
+    fi
+
+    local state_mapping
+    state_mapping=$(resolve_state_mapping "$detect_state" "$has_pending" "$chrome_running")
+    local current_state="${state_mapping#*|}"
 
     local pending_reason
     pending_reason=$(get_pending_field "reason")
@@ -509,8 +519,9 @@ cmd_run() {
     local detect_state="${detect_result%%|*}"
     local detect_reason="${detect_result#*|}"
 
-    local result_status
-    result_status=$(map_detect_state_to_result_status "$detect_state")
+    local initial_mapping
+    initial_mapping=$(resolve_state_mapping "$detect_state" "0" "0")
+    local result_status="${initial_mapping%%|*}"
 
     case "$detect_state" in
         healthy)
@@ -538,9 +549,23 @@ cmd_run() {
                     if [ -z "$installed_chrome_ver" ]; then
                         installed_chrome_ver="$chrome_ver"
                     fi
-                    save_patched_version "$installed_chrome_ver"
+
+                    local verify_detect_result
+                    verify_detect_result=$(detect_patch_state)
+                    local verify_detect_state="${verify_detect_result%%|*}"
+                    local verify_detect_reason="${verify_detect_result#*|}"
+                    local verify_mapping
+                    verify_mapping=$(resolve_state_mapping "$verify_detect_state" "0" "0")
+                    local verify_result_status="${verify_mapping%%|*}"
+
                     remove_pending
-                    write_last_result "healthy" "patched" "$installed_chrome_ver" "patched successfully"
+                    if [ "$verify_result_status" = "healthy" ]; then
+                        save_patched_version "$installed_chrome_ver"
+                        write_last_result "healthy" "patched" "$installed_chrome_ver" "patched successfully"
+                    else
+                        status=1
+                        write_last_result "$verify_result_status" "post_install_${verify_detect_reason}" "$installed_chrome_ver" "post-install state not healthy"
+                    fi
                 else
                     status=1
                     write_last_result "unknown" "core_install_failed" "$chrome_ver" "check core installer output"

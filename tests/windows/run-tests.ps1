@@ -2,7 +2,7 @@ param(
   [string]$Case = ""
 )
 
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..").Path
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $FixtureDir = Join-Path $RepoRoot "tests\fixtures\local-state"
 $RunRoot = Join-Path $env:TEMP ("gemini-chrome-autoinstall-tests-" + [guid]::NewGuid().ToString())
 $RequestedCases = @()

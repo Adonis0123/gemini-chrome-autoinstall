@@ -19,7 +19,6 @@ LOCAL_STATE_FILE="${GEMINI_LOCAL_STATE_PATH:-$HOME/Library/Application Support/G
 TOOL_VERSION_FILE="${SCRIPT_DIR}/VERSION"
 CORE_INSTALL_CMD="${GEMINI_CORE_INSTALL_CMD:-}"
 CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh"
-NEEDS_PATCH_REASON=""
 NEEDS_PATCH_CHROME_VERSION=""
 
 log() {
@@ -83,6 +82,36 @@ get_pending_retry_count() {
     else
         echo "0"
     fi
+}
+
+calculate_pending_age() {
+    if [ ! -f "$PENDING_FILE" ]; then
+        echo "n/a"
+        return 0
+    fi
+
+    local first_seen_at
+    first_seen_at=$(get_pending_field "first_seen_at")
+    if [ -z "$first_seen_at" ]; then
+        echo "unknown"
+        return 0
+    fi
+
+    local first_seen_epoch
+    first_seen_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen_at" "+%s" 2>/dev/null || true)
+    if [ -z "$first_seen_epoch" ]; then
+        echo "unknown"
+        return 0
+    fi
+
+    local now_epoch
+    now_epoch=$(date -u "+%s")
+    if [ "$now_epoch" -lt "$first_seen_epoch" ]; then
+        echo "0s"
+        return 0
+    fi
+
+    echo "$((now_epoch - first_seen_epoch))s"
 }
 
 write_last_result() {
@@ -216,25 +245,45 @@ get_chrome_version() {
     fi
 }
 
-get_local_state_health() {
+detect_patch_state() {
     if [ ! -f "$LOCAL_STATE_FILE" ]; then
-        echo "unknown"
+        echo "unknown|local_state_missing"
         return 0
     fi
 
-    if grep -q '"variations_country"[[:space:]]*:[[:space:]]*"us"' "$LOCAL_STATE_FILE" 2>/dev/null \
-      && grep -q '"is_glic_eligible"[[:space:]]*:[[:space:]]*true' "$LOCAL_STATE_FILE" 2>/dev/null; then
-        echo "healthy"
-        return 0
+    if ! plutil -lint "$LOCAL_STATE_FILE" >/dev/null 2>&1; then
+        if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], "r", encoding="utf-8"))' "$LOCAL_STATE_FILE" >/dev/null 2>&1; then
+            echo "unknown|invalid_json"
+            return 0
+        fi
     fi
 
-    if grep -q '"is_glic_eligible"[[:space:]]*:[[:space:]]*false' "$LOCAL_STATE_FILE" 2>/dev/null \
-      || grep -q '"variations_country"[[:space:]]*:[[:space:]]*"cn"' "$LOCAL_STATE_FILE" 2>/dev/null; then
-        echo "drifted"
-        return 0
-    fi
+    local variations_country
+    variations_country=$(sed -n 's/.*"variations_country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOCAL_STATE_FILE" | head -n 1)
 
-    echo "unknown"
+    local permanent_country
+    permanent_country=$(sed -n 's/.*"variations_permanent_consistency_country"[[:space:]]*:[[:space:]]*\[[^]]*"\([^"]*\)"\][[:space:]]*.*/\1/p' "$LOCAL_STATE_FILE" | head -n 1)
+
+    if [ -z "$variations_country" ] || [ -z "$permanent_country" ]; then
+        echo "unknown|missing_required_fields"
+    elif [ "$variations_country" != "us" ]; then
+        echo "drifted|variations_country=$variations_country"
+    elif [ "$permanent_country" != "us" ]; then
+        echo "drifted|variations_permanent_consistency_country=$permanent_country"
+    elif grep -Eq '"is_glic_eligible"[[:space:]]*:[[:space:]]*false' "$LOCAL_STATE_FILE"; then
+        echo "drifted|glic_not_eligible"
+    else
+        echo "healthy|ok"
+    fi
+}
+
+map_detect_state_to_result_status() {
+    local detect_state="$1"
+    case "$detect_state" in
+        healthy) echo "healthy" ;;
+        drifted) echo "drifted" ;;
+        *) echo "detect_error" ;;
+    esac
 }
 
 get_patched_version() {
@@ -244,26 +293,6 @@ get_patched_version() {
 save_patched_version() {
     mkdir -p "$(dirname "$PATCHED_VERSION_FILE")"
     printf '%s' "$1" > "$PATCHED_VERSION_FILE"
-}
-
-needs_patch() {
-    local chrome_ver
-    chrome_ver=$(get_chrome_version)
-    NEEDS_PATCH_CHROME_VERSION="$chrome_ver"
-    if [ -z "$chrome_ver" ]; then
-        log "Cannot read Chrome version. Skipping."
-        NEEDS_PATCH_REASON="chrome_version_unavailable"
-        return 1
-    fi
-    local patched_ver
-    patched_ver=$(get_patched_version)
-    if [ "$chrome_ver" = "$patched_ver" ]; then
-        log "Already patched for Chrome $chrome_ver. Skipping."
-        NEEDS_PATCH_REASON="already_patched"
-        return 1
-    fi
-    NEEDS_PATCH_REASON="needs_patch"
-    return 0
 }
 
 create_pending() {
@@ -393,56 +422,68 @@ cmd_disable() {
 }
 
 cmd_status() {
-    echo "=== Gemini Chrome AutoInstall Status ==="
-
-    local agent_list
-    agent_list=$(launchctl list 2>/dev/null || true)
-
-    local boot_loaded=false
-    local watcher_loaded=false
-    local retry_loaded=false
-
-    if echo "$agent_list" | grep -q "$BOOT_LABEL"; then
-        boot_loaded=true
-    fi
-    if echo "$agent_list" | grep -q "$WATCHER_LABEL"; then
-        watcher_loaded=true
-    fi
-    if echo "$agent_list" | grep -q "$RETRY_LABEL"; then
-        retry_loaded=true
-    fi
-
-    echo "  Boot agent:    $( $boot_loaded && echo LOADED || echo 'NOT LOADED' )"
-    echo "  Watcher agent: $( $watcher_loaded && echo LOADED || echo 'NOT LOADED' )"
-    echo "  Retry agent:   $( $retry_loaded && echo LOADED || echo 'NOT LOADED' )"
-
     local chrome_ver
     chrome_ver=$(get_chrome_version)
+    if [ -z "$chrome_ver" ]; then
+        chrome_ver="unknown"
+    fi
+
     local patched_ver
     patched_ver=$(get_patched_version)
-    echo "  Chrome ver:    ${chrome_ver:-unknown}"
-    echo "  Patched ver:   ${patched_ver:-never}"
-    echo "  Tool version:  $(get_tool_version)"
+    if [ -z "$patched_ver" ]; then
+        patched_ver="never"
+    fi
 
+    local detect_result
+    detect_result=$(detect_patch_state)
+    local detect_state="${detect_result%%|*}"
+
+    local current_state="unknown"
     if [ -f "$PENDING_FILE" ]; then
-        echo "  Pending:       YES (waiting for Chrome to close)"
+        current_state="pending"
     else
-        echo "  Pending:       no"
+        case "$detect_state" in
+            healthy)
+                current_state="healthy"
+                ;;
+            drifted)
+                if is_chrome_running; then
+                    current_state="unknown"
+                else
+                    current_state="drifted"
+                fi
+                ;;
+            *)
+                current_state="unknown"
+                ;;
+        esac
     fi
 
-    if [ -d "$ACTIVE_LOCK_DIR" ]; then
-        echo "  Running:       YES (patch in progress)"
-    else
-        echo "  Running:       no"
+    local pending_reason
+    pending_reason=$(get_pending_field "reason")
+    if [ -z "$pending_reason" ]; then
+        pending_reason="none"
     fi
 
-    local last_status
-    last_status=$(get_last_result_field "status")
-    if [ -n "$last_status" ]; then
-        echo "  Last result:   ${last_status}"
+    local pending_age
+    pending_age=$(calculate_pending_age)
+
+    local last_attempt
+    last_attempt=$(get_pending_field "last_attempt_at")
+    if [ -z "$last_attempt" ]; then
+        last_attempt=$(get_last_result_field "timestamp")
+    fi
+    if [ -z "$last_attempt" ]; then
+        last_attempt="never"
     fi
 
-    return 0
+    echo "Tool version: $(get_tool_version)"
+    echo "Chrome version: ${chrome_ver}"
+    echo "Last healthy version: ${patched_ver}"
+    echo "Current state: ${current_state}"
+    echo "Pending reason: ${pending_reason}"
+    echo "Pending age: ${pending_age}"
+    echo "Last attempt: ${last_attempt}"
 }
 
 cmd_uninstall() {
@@ -456,37 +497,44 @@ cmd_uninstall() {
 cmd_run() {
     log "Run triggered."
 
-    if ! needs_patch; then
-        local local_state_health
-        local_state_health=$(get_local_state_health)
-        write_last_result "$local_state_health" "$NEEDS_PATCH_REASON" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "no patch needed"
-        return 0
+    local chrome_ver
+    chrome_ver=$(get_chrome_version)
+    if [ -z "$chrome_ver" ]; then
+        chrome_ver="unknown"
     fi
+    NEEDS_PATCH_CHROME_VERSION="$chrome_ver"
 
-    if ! acquire_active_lock; then
-        write_last_result "unknown" "active_lock_busy" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "another run in progress"
-        return 0
-    fi
-    arm_active_lock_cleanup
+    local detect_result
+    detect_result=$(detect_patch_state)
+    local detect_state="${detect_result%%|*}"
+    local detect_reason="${detect_result#*|}"
 
-    local status=0
-    if is_chrome_running; then
-        create_pending
-        write_last_result "pending" "chrome_running" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "close Chrome and wait for retry"
-    else
-        if run_core_install; then
-            save_patched_version "$(get_chrome_version)"
+    local result_status
+    result_status=$(map_detect_state_to_result_status "$detect_state")
+
+    case "$detect_state" in
+        healthy)
             remove_pending
-            write_last_result "healthy" "patched" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "patched successfully"
-        else
-            status=1
-            write_last_result "unknown" "core_install_failed" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "check core installer output"
-        fi
-    fi
+            if [ "$chrome_ver" != "unknown" ]; then
+                save_patched_version "$chrome_ver"
+            fi
+            write_last_result "healthy" "$detect_reason" "$chrome_ver" "local state verified"
+            ;;
+        drifted)
+            if is_chrome_running; then
+                create_pending
+                write_last_result "pending" "chrome_running" "$chrome_ver" "close Chrome and wait for retry"
+            else
+                remove_pending
+                write_last_result "$result_status" "$detect_reason" "$chrome_ver" "local state drifted"
+            fi
+            ;;
+        *)
+            write_last_result "$result_status" "$detect_reason" "$chrome_ver" "local state detection failed"
+            ;;
+    esac
 
-    disarm_active_lock_cleanup
-    release_active_lock
-    return $status
+    return 0
 }
 
 cmd_retry() {
@@ -495,13 +543,7 @@ cmd_retry() {
     fi
 
     log "Retry: pending install found."
-
-    if ! needs_patch; then
-        log "Retry: no longer needs patching. Clearing pending."
-        remove_pending
-        write_last_result "healthy" "already_patched" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "pending cleared"
-        return 0
-    fi
+    NEEDS_PATCH_CHROME_VERSION="${NEEDS_PATCH_CHROME_VERSION:-$(get_chrome_version)}"
 
     if is_chrome_running; then
         local now
@@ -519,26 +561,8 @@ cmd_retry() {
         return 0
     fi
 
-    if ! acquire_active_lock; then
-        write_last_result "unknown" "active_lock_busy" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "another run in progress"
-        return 0
-    fi
-    arm_active_lock_cleanup
-
-    local status=0
-    if run_core_install; then
-        save_patched_version "$(get_chrome_version)"
-        remove_pending
-        log "Retry: install completed successfully."
-        write_last_result "healthy" "patched" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "patched successfully"
-    else
-        status=1
-        write_last_result "unknown" "core_install_failed" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "check core installer output"
-    fi
-
-    disarm_active_lock_cleanup
-    release_active_lock
-    return $status
+    remove_pending
+    cmd_run
 }
 
 cmd_manual() {

@@ -116,6 +116,24 @@ if run_case "tri-state-healthy" env \
   assert_file_contains "$TRI_STATE_RUNTIME_DIR/last-result" "status=healthy"
 fi
 
+if run_case "tri-state-drifted-country" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
+  GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/drifted-variations-country.json" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$TMPDIR/runtime/last-result" "status=drifted"
+fi
+
+if run_case "tri-state-unknown-invalid-json" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
+  GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/unknown-invalid.json" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$TMPDIR/runtime/last-result" "status=detect_error"
+fi
+
 if [[ "${#TEST_CASES[@]}" -gt 0 ]]; then
   echo "[INFO] requested cases: ${TEST_CASES[*]}"
   if [[ "${CASES_RUN}" -eq 0 ]]; then

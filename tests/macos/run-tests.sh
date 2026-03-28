@@ -19,11 +19,9 @@ run_case() {
   shift
 
   if [[ -n "${TEST_CASE}" && "${TEST_CASE}" != "${case_name}" ]]; then
-    CASE_EXECUTED=0
     return 2
   fi
 
-  CASE_EXECUTED=1
   echo "==> ${case_name}"
 
   set +e

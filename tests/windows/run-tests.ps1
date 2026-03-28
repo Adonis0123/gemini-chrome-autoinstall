@@ -51,6 +51,7 @@ function Invoke-Case {
     "GEMINI_LOCAL_STATE_PATH",
     "GEMINI_CHROME_VERSION",
     "GEMINI_CHROME_RUNNING",
+    "GEMINI_CORE_INSTALL_CMD",
     "GEMINI_FAKE_INSTALL_MODE",
     "GEMINI_PROFILE_PATH",
     "GEMINI_SKIP_ENABLE",
@@ -158,6 +159,18 @@ function Assert-PathExists {
   }
 }
 
+function Assert-FileMissing {
+  param([string]$Path)
+
+  if (-not (Test-Path $Path)) {
+    Write-Host "[PASS] file is missing: $Path"
+  }
+  else {
+    Write-Host "[FAIL] unexpected file present: $Path"
+    $global:Failures++
+  }
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 
@@ -211,6 +224,135 @@ try {
     & "$RepoRoot\patch.ps1" run | Out-Null
     Assert-FileContains (Join-Path $triRuntimeRoot "last-result") "status=healthy"
   } -CaseEnv $triEnv
+
+  $driftedGlicCaseRoot = Join-Path $RunRoot "tri-state-drifted-glic"
+  $driftedGlicRuntimeRoot = Join-Path $driftedGlicCaseRoot "runtime"
+  $driftedGlicEnv = @{
+    "USERPROFILE" = Join-Path $driftedGlicCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $driftedGlicCaseRoot "localappdata"
+    "TEMP" = Join-Path $driftedGlicCaseRoot "temp"
+    "TMP" = Join-Path $driftedGlicCaseRoot "temp"
+    "TMPDIR" = Join-Path $driftedGlicCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $driftedGlicRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "drifted-glic-false.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "tri-state-drifted-glic" {
+    New-Item -ItemType Directory -Force -Path $driftedGlicRuntimeRoot | Out-Null
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    Assert-FileContains (Join-Path $driftedGlicRuntimeRoot "last-result") "status=drifted"
+  } -CaseEnv $driftedGlicEnv
+
+  $unknownCaseRoot = Join-Path $RunRoot "tri-state-unknown-missing-fields"
+  $unknownRuntimeRoot = Join-Path $unknownCaseRoot "runtime"
+  $unknownEnv = @{
+    "USERPROFILE" = Join-Path $unknownCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $unknownCaseRoot "localappdata"
+    "TEMP" = Join-Path $unknownCaseRoot "temp"
+    "TMP" = Join-Path $unknownCaseRoot "temp"
+    "TMPDIR" = Join-Path $unknownCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $unknownRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "unknown-missing-fields.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "tri-state-unknown-missing-fields" {
+    New-Item -ItemType Directory -Force -Path $unknownRuntimeRoot | Out-Null
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    Assert-FileContains (Join-Path $unknownRuntimeRoot "last-result") "status=detect_error"
+    Assert-FileContains (Join-Path $unknownRuntimeRoot "last-result") "reason=missing_required_fields"
+  } -CaseEnv $unknownEnv
+
+  $blockedCaseRoot = Join-Path $RunRoot "chrome-running-creates-pending"
+  $blockedRuntimeRoot = Join-Path $blockedCaseRoot "runtime"
+  $blockedEnv = @{
+    "USERPROFILE" = Join-Path $blockedCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $blockedCaseRoot "localappdata"
+    "TEMP" = Join-Path $blockedCaseRoot "temp"
+    "TMP" = Join-Path $blockedCaseRoot "temp"
+    "TMPDIR" = Join-Path $blockedCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $blockedRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "drifted-variations-country.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "1"
+  }
+  Invoke-Case "chrome-running-creates-pending" {
+    New-Item -ItemType Directory -Force -Path $blockedRuntimeRoot | Out-Null
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    Assert-FileContains (Join-Path $blockedRuntimeRoot "pending") "reason=blocked"
+    Assert-FileContains (Join-Path $blockedRuntimeRoot "last-result") "status=blocked"
+  } -CaseEnv $blockedEnv
+
+  $retryCaseRoot = Join-Path $RunRoot "retry-settles-after-close"
+  $retryRuntimeRoot = Join-Path $retryCaseRoot "runtime"
+  $retryLocalStatePath = Join-Path $retryRuntimeRoot "Local State"
+  $retryEnv = @{
+    "USERPROFILE" = Join-Path $retryCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $retryCaseRoot "localappdata"
+    "TEMP" = Join-Path $retryCaseRoot "temp"
+    "TMP" = Join-Path $retryCaseRoot "temp"
+    "TMPDIR" = Join-Path $retryCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $retryRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = $retryLocalStatePath
+    "GEMINI_CORE_INSTALL_CMD" = "$RepoRoot\tests\helpers\fake-core-install.ps1"
+    "GEMINI_FAKE_INSTALL_MODE" = "success"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "1"
+  }
+  Invoke-Case "retry-settles-after-close" {
+    New-Item -ItemType Directory -Force -Path $retryRuntimeRoot | Out-Null
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") $retryLocalStatePath -Force
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    $env:GEMINI_CHROME_RUNNING = "0"
+    & "$RepoRoot\patch.ps1" retry | Out-Null
+    Assert-FileMissing (Join-Path $retryRuntimeRoot "pending")
+    Assert-FileContains (Join-Path $retryRuntimeRoot "last-result") "status=healthy"
+  } -CaseEnv $retryEnv
+
+  $patchFailureCaseRoot = Join-Path $RunRoot "patch-failure-recorded"
+  $patchFailureRuntimeRoot = Join-Path $patchFailureCaseRoot "runtime"
+  $patchFailureEnv = @{
+    "USERPROFILE" = Join-Path $patchFailureCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $patchFailureCaseRoot "localappdata"
+    "TEMP" = Join-Path $patchFailureCaseRoot "temp"
+    "TMP" = Join-Path $patchFailureCaseRoot "temp"
+    "TMPDIR" = Join-Path $patchFailureCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $patchFailureRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "drifted-glic-false.json"
+    "GEMINI_CORE_INSTALL_CMD" = "$RepoRoot\tests\helpers\fake-core-install.ps1"
+    "GEMINI_FAKE_INSTALL_MODE" = "patch_fail"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "patch-failure-recorded" {
+    New-Item -ItemType Directory -Force -Path $patchFailureRuntimeRoot | Out-Null
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    Assert-FileContains (Join-Path $patchFailureRuntimeRoot "last-result") "status=patch_failed"
+  } -CaseEnv $patchFailureEnv
+
+  $verifyFailureCaseRoot = Join-Path $RunRoot "verify-failure-recorded"
+  $verifyFailureRuntimeRoot = Join-Path $verifyFailureCaseRoot "runtime"
+  $verifyFailureLocalStatePath = Join-Path $verifyFailureRuntimeRoot "Local State"
+  $verifyFailureEnv = @{
+    "USERPROFILE" = Join-Path $verifyFailureCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $verifyFailureCaseRoot "localappdata"
+    "TEMP" = Join-Path $verifyFailureCaseRoot "temp"
+    "TMP" = Join-Path $verifyFailureCaseRoot "temp"
+    "TMPDIR" = Join-Path $verifyFailureCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $verifyFailureRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = $verifyFailureLocalStatePath
+    "GEMINI_CORE_INSTALL_CMD" = "$RepoRoot\tests\helpers\fake-core-install.ps1"
+    "GEMINI_FAKE_INSTALL_MODE" = "verify_fail"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "verify-failure-recorded" {
+    New-Item -ItemType Directory -Force -Path $verifyFailureRuntimeRoot | Out-Null
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") $verifyFailureLocalStatePath -Force
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    Assert-FileContains (Join-Path $verifyFailureRuntimeRoot "last-result") "status=verify_failed"
+  } -CaseEnv $verifyFailureEnv
 
   if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
     Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"

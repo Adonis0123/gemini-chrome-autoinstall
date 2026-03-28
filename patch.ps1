@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("enable", "disable", "uninstall", "status", "run", "manual", "watch", "scheduled", "help")]
+    [ValidateSet("enable", "disable", "uninstall", "status", "run", "retry", "manual", "watch", "scheduled", "help")]
     [string]$Command = "help"
 )
 
@@ -19,9 +19,11 @@ $PatchedVersionFile = Join-Path $InstallDir "patched-version.txt"
 $LastResultFile = Join-Path $InstallDir "last-result"
 $ToolVersionFile = Join-Path $PSScriptRoot "VERSION"
 $CoreInstallCommand = $env:GEMINI_CORE_INSTALL_CMD
+$ChromeUpdateClientPath = "HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
+$ChromeUpdateRegistrySubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
+$ChromeUpdateVersionName = "pv"
 $RetryInterval = 60  # seconds
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
-$script:NeedsPatchReason = ""
 $script:NeedsPatchChromeVersion = $null
 
 function Write-Log {
@@ -80,9 +82,44 @@ function Get-PendingRetryCount {
     return 0
 }
 
+function Get-PendingPatchReason {
+    $patchReason = Get-PendingField -Key "patch_reason"
+    if ($patchReason) {
+        return $patchReason
+    }
+
+    $pendingReason = Get-PendingField -Key "reason"
+    if ($pendingReason) {
+        return $pendingReason
+    }
+
+    return "unknown"
+}
+
+function Get-PendingAge {
+    if (-not (Test-Path $PendingFile)) {
+        return "n/a"
+    }
+
+    $firstSeenAt = Get-PendingField -Key "first_seen_at"
+    if (-not $firstSeenAt) {
+        return "unknown"
+    }
+
+    try {
+        $firstSeen = [DateTime]::Parse($firstSeenAt).ToUniversalTime()
+        $age = [Math]::Max([int]([DateTime]::UtcNow - $firstSeen).TotalSeconds, 0)
+        return "$age" + "s"
+    }
+    catch {
+        return "unknown"
+    }
+}
+
 function Write-PendingMetadata {
     param(
         [string]$Reason,
+        [string]$PatchReason,
         [string]$FirstSeenAt,
         [string]$LastAttemptAt,
         [int]$RetryCount,
@@ -97,6 +134,7 @@ function Write-PendingMetadata {
     @(
         "pending"
         "reason=$Reason"
+        "patch_reason=$PatchReason"
         "first_seen_at=$FirstSeenAt"
         "last_attempt_at=$LastAttemptAt"
         "retry_count=$RetryCount"
@@ -224,18 +262,25 @@ function Invoke-CoreInstall {
     }
 }
 
-function Get-ChromeRegistryVersion {
+function Get-ChromeVersion {
     if ($env:GEMINI_CHROME_VERSION) {
         return $env:GEMINI_CHROME_VERSION
     }
 
     try {
-        $regPath = "HKCU:\Software\Google\Chrome\BLBeacon"
-        return (Get-ItemProperty -Path $regPath -Name "version" -ErrorAction Stop).version
+        return (Get-ItemProperty -Path $ChromeUpdateClientPath -Name $ChromeUpdateVersionName -ErrorAction Stop).$ChromeUpdateVersionName
     }
     catch {
         return (Get-LocalStateVersion)
     }
+}
+
+function Get-ChromeVersionOrUnknown {
+    $chromeVersion = Get-ChromeVersion
+    if ($chromeVersion) {
+        return $chromeVersion
+    }
+    return "unknown"
 }
 
 function Get-LocalStateVersion {
@@ -252,19 +297,97 @@ function Get-LocalStateVersion {
     }
 }
 
-function Get-LocalStateHealth {
+function Get-PatchState {
     if (-not (Test-Path $LocalStatePath)) {
-        return "unknown"
+        return @{ state = "unknown"; reason = "local_state_missing" }
     }
 
-    $raw = Get-Content -Path $LocalStatePath -Raw -ErrorAction SilentlyContinue
-    if ($raw -match '"variations_country"\s*:\s*"us"' -and $raw -match '"is_glic_eligible"\s*:\s*true') {
-        return "healthy"
+    try {
+        $json = Get-Content -Path $LocalStatePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
     }
-    if ($raw -match '"is_glic_eligible"\s*:\s*false' -or $raw -match '"variations_country"\s*:\s*"cn"') {
-        return "drifted"
+    catch {
+        return @{ state = "unknown"; reason = "invalid_json" }
     }
-    return "unknown"
+
+    if (-not ($json.PSObject.Properties.Name -contains "variations_country") -or
+        -not ($json.PSObject.Properties.Name -contains "variations_permanent_consistency_country")) {
+        return @{ state = "unknown"; reason = "missing_required_fields" }
+    }
+
+    $variationsCountry = [string]$json.variations_country
+    $permanentCountryValues = @($json.variations_permanent_consistency_country)
+    if ($permanentCountryValues.Count -eq 0) {
+        return @{ state = "unknown"; reason = "missing_required_fields" }
+    }
+    $permanentCountry = [string]$permanentCountryValues[-1]
+
+    $hasGlicTrue = $false
+    $hasGlicFalse = $false
+    if ($json.profile -and $json.profile.info_cache) {
+        foreach ($property in $json.profile.info_cache.PSObject.Properties) {
+            $profileValue = $property.Value
+            if ($profileValue -and ($profileValue.PSObject.Properties.Name -contains "is_glic_eligible")) {
+                if ($profileValue.is_glic_eligible -eq $true) {
+                    $hasGlicTrue = $true
+                }
+                elseif ($profileValue.is_glic_eligible -eq $false) {
+                    $hasGlicFalse = $true
+                }
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($variationsCountry) -or
+        [string]::IsNullOrWhiteSpace($permanentCountry) -or
+        (-not $hasGlicTrue -and -not $hasGlicFalse)) {
+        return @{ state = "unknown"; reason = "missing_required_fields" }
+    }
+
+    if ($variationsCountry -ne "us") {
+        return @{ state = "drifted"; reason = "variations_country=$variationsCountry" }
+    }
+
+    if ($permanentCountry -ne "us") {
+        return @{ state = "drifted"; reason = "variations_permanent_consistency_country=$permanentCountry" }
+    }
+
+    if ($hasGlicFalse) {
+        return @{ state = "drifted"; reason = "glic_not_eligible" }
+    }
+
+    return @{ state = "healthy"; reason = "ok" }
+}
+
+function Resolve-StateMapping {
+    param(
+        [string]$PatchState,
+        [bool]$HasPending,
+        [bool]$ChromeRunning
+    )
+
+    $resultStatus = switch ($PatchState) {
+        "healthy" { "healthy" }
+        "drifted" { "drifted" }
+        default { "detect_error" }
+    }
+
+    $currentState = if ($HasPending) {
+        "pending"
+    }
+    elseif ($PatchState -eq "healthy") {
+        "healthy"
+    }
+    elseif ($PatchState -eq "drifted") {
+        "drifted"
+    }
+    else {
+        "unknown"
+    }
+
+    return @{
+        resultStatus = $resultStatus
+        currentState = $currentState
+    }
 }
 
 function Test-IsChromeRunning {
@@ -307,34 +430,31 @@ function Save-PatchedVersion {
     Set-Content -Path $PatchedVersionFile -Value $Version -NoNewline
 }
 
-function Test-NeedsPatch {
-    $chromeVer = Get-ChromeRegistryVersion
-    $script:NeedsPatchChromeVersion = $chromeVer
-    if (-not $chromeVer) {
-        Write-Log "Cannot read Chrome version. Skipping."
-        $script:NeedsPatchReason = "chrome_version_unavailable"
-        return $false
-    }
-    $patchedVer = Get-PatchedVersion
-    if ($chromeVer -eq $patchedVer) {
-        Write-Log "Already patched for Chrome $chromeVer. Skipping."
-        $script:NeedsPatchReason = "already_patched"
-        return $false
-    }
-    $script:NeedsPatchReason = "needs_patch"
-    return $true
-}
+function Upsert-PendingRecord {
+    param(
+        [string]$Reason,
+        [string]$PatchReason
+    )
 
-function Set-Pending {
     $now = Get-NowIso
     $firstSeen = Get-PendingField -Key "first_seen_at"
     if (-not $firstSeen) {
         $firstSeen = $now
     }
     $retryCount = (Get-PendingRetryCount) + 1
-    $detectedVersion = if ($script:NeedsPatchChromeVersion) { $script:NeedsPatchChromeVersion } else { Get-ChromeRegistryVersion }
-    Write-PendingMetadata -Reason "chrome_running" -FirstSeenAt $firstSeen -LastAttemptAt $now -RetryCount $retryCount -DetectedVersion $detectedVersion
-    Write-Log "Chrome is running. Created pending flag for deferred install."
+    $detectedVersion = if ($script:NeedsPatchChromeVersion) { $script:NeedsPatchChromeVersion } else { Get-ChromeVersionOrUnknown }
+    Write-PendingMetadata -Reason $Reason -PatchReason $PatchReason -FirstSeenAt $firstSeen -LastAttemptAt $now -RetryCount $retryCount -DetectedVersion $detectedVersion
+    Write-Log "Pending record updated ($Reason / $PatchReason, retry_count=$retryCount)."
+}
+
+function Should-AttemptRetryNow {
+    param([int]$RetryCount)
+
+    if ($RetryCount -lt 10) {
+        return $true
+    }
+
+    return ($RetryCount % 5) -eq 0
 }
 
 function Remove-Pending {
@@ -345,43 +465,103 @@ function Test-Pending {
     return (Test-Path $PendingFile)
 }
 
-function Invoke-PendingInstall {
-    if (-not (Test-Pending)) { return }
-    if (Test-IsChromeRunning) {
-        $now = Get-NowIso
-        $firstSeen = Get-PendingField -Key "first_seen_at"
-        if (-not $firstSeen) {
-            $firstSeen = $now
-        }
-        $retryCount = (Get-PendingRetryCount) + 1
-        $detectedVersion = if ($script:NeedsPatchChromeVersion) { $script:NeedsPatchChromeVersion } else { Get-ChromeRegistryVersion }
-        Write-PendingMetadata -Reason "chrome_running" -FirstSeenAt $firstSeen -LastAttemptAt $now -RetryCount $retryCount -DetectedVersion $detectedVersion
-        Write-LastResult -Status "pending" -Reason "chrome_running" -ChromeVersion $detectedVersion -Hint "retry scheduled"
-        return
-    }
-    if (-not (Test-NeedsPatch)) {
-        Write-Log "Retry: no longer needs patching. Clearing pending."
-        Remove-Pending
-        Write-LastResult -Status "healthy" -Reason "already_patched" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "pending cleared"
-        return
-    }
+function Invoke-PatchAndVerify {
+    param([string]$PatchReason)
 
-    Write-Log "Retry: pending install found, Chrome is closed. Installing."
-    if (-not (Enter-ActiveLock)) { return }
+    $chromeVersion = Get-ChromeVersionOrUnknown
+
+    if (-not (Enter-ActiveLock)) {
+        Upsert-PendingRecord -Reason "active_lock_busy" -PatchReason $PatchReason
+        Write-LastResult -Status "blocked" -Reason "active_lock_busy" -ChromeVersion $chromeVersion -Hint "another run in progress"
+        return $true
+    }
 
     try {
-        if (Invoke-CoreInstall) {
-            Save-PatchedVersion (Get-ChromeRegistryVersion)
-            Remove-Pending
-            Write-Log "Retry: install completed successfully."
-            Write-LastResult -Status "healthy" -Reason "patched" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "patched successfully"
-        } else {
-            Write-LastResult -Status "unknown" -Reason "core_install_failed" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "check core installer output"
+        if (-not (Invoke-CoreInstall)) {
+            Upsert-PendingRecord -Reason "patch_failed" -PatchReason $PatchReason
+            Write-LastResult -Status "patch_failed" -Reason $PatchReason -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
+            return $false
         }
+
+        $verifyState = Get-PatchState
+        if ($verifyState.state -ne "healthy") {
+            Upsert-PendingRecord -Reason "verify_failed" -PatchReason $verifyState.reason
+            Write-LastResult -Status "verify_failed" -Reason $verifyState.reason -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
+            return $false
+        }
+
+        $installedVersion = Get-ChromeVersionOrUnknown
+        if ($installedVersion -ne "unknown") {
+            Save-PatchedVersion $installedVersion
+        }
+        Remove-Pending
+        Write-LastResult -Status "healthy" -Reason $verifyState.reason -ChromeVersion $installedVersion -Hint ""
+        return $true
     }
     finally {
         Exit-ActiveLock
     }
+}
+
+function Invoke-Reconcile {
+    param([string]$Trigger = "manual")
+
+    $patchState = Get-PatchState
+    $chromeVersion = Get-ChromeVersionOrUnknown
+    $script:NeedsPatchChromeVersion = $chromeVersion
+
+    switch ($patchState.state) {
+        "healthy" {
+            if ($chromeVersion -ne "unknown") {
+                Save-PatchedVersion $chromeVersion
+            }
+            Remove-Pending
+            Write-LastResult -Status "healthy" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint ""
+            return $true
+        }
+        "unknown" {
+            Write-LastResult -Status "detect_error" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
+            return $false
+        }
+        "drifted" {
+            if (Test-IsChromeRunning) {
+                Upsert-PendingRecord -Reason "blocked" -PatchReason $patchState.reason
+                Write-LastResult -Status "blocked" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint "Chrome 关闭后将自动修复"
+                return $true
+            }
+            return (Invoke-PatchAndVerify -PatchReason $patchState.reason)
+        }
+        default {
+            Write-LastResult -Status "detect_error" -Reason "unknown_patch_state:$($patchState.state)" -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
+            return $false
+        }
+    }
+}
+
+function Invoke-PendingInstall {
+    if (-not (Test-Pending)) {
+        return
+    }
+
+    Write-Log "Retry: pending install found."
+    $script:NeedsPatchChromeVersion = Get-ChromeVersionOrUnknown
+    $pendingPatchReason = Get-PendingPatchReason
+
+    if (Test-IsChromeRunning) {
+        Upsert-PendingRecord -Reason "blocked" -PatchReason $pendingPatchReason
+        Write-LastResult -Status "blocked" -Reason $pendingPatchReason -ChromeVersion $script:NeedsPatchChromeVersion -Hint "Chrome 关闭后将自动修复"
+        return
+    }
+
+    $retryCount = Get-PendingRetryCount
+    if (-not (Should-AttemptRetryNow -RetryCount $retryCount)) {
+        Upsert-PendingRecord -Reason "backoff_wait" -PatchReason $pendingPatchReason
+        Write-LastResult -Status "blocked" -Reason "retry_backoff" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "等待下一次自动重试窗口"
+        Write-Log "Retry throttled by internal backoff (retry_count=$retryCount)."
+        return
+    }
+
+    [void](Invoke-Reconcile -Trigger "retry")
 }
 
 function Invoke-Enable {
@@ -456,30 +636,48 @@ function Invoke-Status {
         Write-Host "  Watcher:      not running"
     }
 
-    $chromeVer = Get-ChromeRegistryVersion
+    $chromeVer = Get-ChromeVersionOrUnknown
     $patchedVer = Get-PatchedVersion
-    Write-Host "  Chrome ver:   $( if ($chromeVer) { $chromeVer } else { '(not found)' } )"
-    Write-Host "  Patched ver:  $( if ($patchedVer) { $patchedVer } else { 'never' } )"
+    if (-not $patchedVer) {
+        $patchedVer = "never"
+    }
+
+    $patchState = Get-PatchState
+    $hasPending = Test-Pending
+    $chromeRunning = Test-IsChromeRunning
+    $stateMapping = Resolve-StateMapping -PatchState $patchState.state -HasPending:$hasPending -ChromeRunning:$chromeRunning
+
+    $pendingReason = Get-PendingField -Key "reason"
+    if (-not $pendingReason) {
+        $pendingReason = "none"
+    }
+
+    $pendingPatchReason = Get-PendingPatchReason
+    if (-not $hasPending) {
+        $pendingPatchReason = "none"
+    }
+
+    $pendingRetryCount = Get-PendingRetryCount
+    $pendingAge = Get-PendingAge
+
+    $lastAttempt = Get-PendingField -Key "last_attempt_at"
+    if (-not $lastAttempt) {
+        $lastAttempt = Get-LastResultField -Key "timestamp"
+    }
+    if (-not $lastAttempt) {
+        $lastAttempt = "never"
+    }
+
     Write-Host "  Tool version: $(Get-ToolVersion)"
-
-    if (Test-Pending) {
-        Write-Host "  Pending:      YES (waiting for Chrome to close)"
-    } else {
-        Write-Host "  Pending:      no"
-    }
-
-    if (Test-Path $ActiveLockDir) {
-        Write-Host "  Running:      YES (patch in progress)"
-    } else {
-        Write-Host "  Running:      no"
-    }
-
-    $lastStatus = Get-LastResultField -Key "status"
-    if ($lastStatus) {
-        Write-Host "  Last result:  $lastStatus"
-    }
-
-    Write-Host "  Log:          $LogFile"
+    Write-Host "  Chrome version: $chromeVer"
+    Write-Host "  Last healthy version: $patchedVer"
+    Write-Host "  Current state: $($stateMapping.currentState)"
+    Write-Host "  Pending reason: $pendingReason"
+    Write-Host "  Pending patch reason: $pendingPatchReason"
+    Write-Host "  Pending retry count: $pendingRetryCount"
+    Write-Host "  Pending age: $pendingAge"
+    Write-Host "  Last attempt: $lastAttempt"
+    Write-Host "  Log: $LogFile"
 }
 
 function Invoke-Uninstall {
@@ -494,48 +692,19 @@ function Invoke-Uninstall {
 
 function Invoke-Run {
     Write-Log "Run triggered."
-
-    if (-not (Test-NeedsPatch)) {
-        $health = Get-LocalStateHealth
-        Write-LastResult -Status $health -Reason $script:NeedsPatchReason -ChromeVersion $script:NeedsPatchChromeVersion -Hint "no patch needed"
-        return $false
-    }
-
-    if (-not (Enter-ActiveLock)) {
-        Write-LastResult -Status "unknown" -Reason "active_lock_busy" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "another run in progress"
-        return $false
-    }
-
-    try {
-        if (Test-IsChromeRunning) {
-            Set-Pending
-            Write-LastResult -Status "pending" -Reason "chrome_running" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "close Chrome and wait for retry"
-            return $false
-        }
-
-        $success = Invoke-CoreInstall
-        if ($success) {
-            Save-PatchedVersion (Get-ChromeRegistryVersion)
-            Remove-Pending
-            Write-LastResult -Status "healthy" -Reason "patched" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "patched successfully"
-        } else {
-            Write-LastResult -Status "unknown" -Reason "core_install_failed" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "check core installer output"
-        }
-        return $success
-    }
-    finally {
-        Exit-ActiveLock
-    }
+    [void](Invoke-Reconcile -Trigger "run")
 }
 
 function Invoke-Manual {
     Write-Log "Manual install triggered."
+    $reopenChrome = $false
 
     if (Test-IsChromeRunning) {
         $response = Read-Host "Chrome is running. Close it to continue? (Y/N)"
         if ($response -eq 'Y' -or $response -eq 'y') {
             Write-Log "Closing Chrome (user confirmed)..."
             Stop-Process -Name "chrome" -Force -ErrorAction SilentlyContinue
+            $reopenChrome = $true
             $waited = 0
             while (Test-IsChromeRunning) {
                 if ($waited -ge 30) {
@@ -551,37 +720,20 @@ function Invoke-Manual {
         }
     }
 
-    if (-not (Enter-ActiveLock)) {
-        Write-LastResult -Status "unknown" -Reason "active_lock_busy" -ChromeVersion (Get-ChromeRegistryVersion) -Hint "another run in progress"
-        return
-    }
+    $success = Invoke-Reconcile -Trigger "manual"
 
-    try {
-        $success = Invoke-CoreInstall
-        if ($success) {
-            Save-PatchedVersion (Get-ChromeRegistryVersion)
-            Remove-Pending
-            Write-LastResult -Status "healthy" -Reason "manual_patched" -ChromeVersion (Get-ChromeRegistryVersion) -Hint "patched successfully"
-        } else {
-            Write-LastResult -Status "unknown" -Reason "manual_install_failed" -ChromeVersion (Get-ChromeRegistryVersion) -Hint "check core installer output"
-        }
-    }
-    finally {
-        Exit-ActiveLock
-    }
-
-    if ($success) {
+    if ($success -and $reopenChrome) {
         Write-Log "Reopening Chrome..."
         Start-Process "chrome"
     }
 }
 
 function Invoke-Watch {
-    Write-Log "Watch started: monitoring registry for Chrome version changes."
+    Write-Log "Watch started: monitoring Google Update version changes."
 
-    $currentVersion = Get-ChromeRegistryVersion
+    $currentVersion = Get-ChromeVersion
     if (-not $currentVersion) {
-        Write-Log "Watch: Chrome registry key not found. Exiting."
+        Write-Log "Watch: Chrome version source not found. Exiting."
         return
     }
     if (-not (Get-SavedChromeVersion)) {
@@ -638,7 +790,7 @@ public class RegistryWatcher {
     $hKey = [IntPtr]::Zero
     $result = [RegistryWatcher]::RegOpenKeyEx(
         [RegistryWatcher]::HKEY_CURRENT_USER,
-        "Software\Google\Chrome\BLBeacon",
+        $ChromeUpdateRegistrySubKey,
         0,
         [RegistryWatcher]::KEY_NOTIFY,
         [ref]$hKey
@@ -672,33 +824,13 @@ public class RegistryWatcher {
                 # Registry changed
                 [RegistryWatcher]::ResetEvent($hEvent) | Out-Null
 
-                $newVersion = Get-ChromeRegistryVersion
+                $newVersion = Get-ChromeVersion
                 $savedVersion = Get-SavedChromeVersion
 
                 if ($newVersion -and $newVersion -ne $savedVersion) {
                     Write-Log "Watch: Chrome version changed ($savedVersion -> $newVersion). Triggering patch."
                     Save-ChromeVersion $newVersion
-
-                    if (Test-NeedsPatch) {
-                        if (Test-IsChromeRunning) {
-                            Set-Pending
-                            Write-LastResult -Status "pending" -Reason "chrome_running" -ChromeVersion $newVersion -Hint "close Chrome and wait for retry"
-                        } else {
-                            if (Enter-ActiveLock) {
-                                try {
-                                    if (Invoke-CoreInstall) {
-                                        Save-PatchedVersion $newVersion
-                                        Remove-Pending
-                                        Write-LastResult -Status "healthy" -Reason "patched" -ChromeVersion $newVersion -Hint "patched successfully"
-                                    } else {
-                                        Write-LastResult -Status "unknown" -Reason "core_install_failed" -ChromeVersion $newVersion -Hint "check core installer output"
-                                    }
-                                } finally {
-                                    Exit-ActiveLock
-                                }
-                            }
-                        }
-                    }
+                    [void](Invoke-Reconcile -Trigger "watch")
                 }
             } elseif ($waitResult -eq [RegistryWatcher]::WAIT_TIMEOUT) {
                 # Timeout — check for pending install
@@ -713,7 +845,7 @@ public class RegistryWatcher {
             $hKey = [IntPtr]::Zero
             $result = [RegistryWatcher]::RegOpenKeyEx(
                 [RegistryWatcher]::HKEY_CURRENT_USER,
-                "Software\Google\Chrome\BLBeacon",
+                $ChromeUpdateRegistrySubKey,
                 0,
                 [RegistryWatcher]::KEY_NOTIFY,
                 [ref]$hKey
@@ -738,8 +870,7 @@ public class RegistryWatcher {
 function Invoke-Scheduled {
     Write-Log "Scheduled entry triggered."
 
-    # Attempt pending install on startup (Chrome may be closed now)
-    Invoke-PendingInstall
+    [void](Invoke-Reconcile -Trigger "startup")
 
     # Ensure watch process is running
     $watchRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
@@ -762,19 +893,22 @@ switch ($Command) {
     "uninstall" { Invoke-Uninstall }
     "status"    { Invoke-Status }
     "run"       { Invoke-Run }
+    "retry"     { Invoke-PendingInstall }
     "manual"    { Invoke-Manual }
     "watch"     { Invoke-Watch }
     "scheduled" { Invoke-Scheduled }
     default {
-        Write-Host "Usage: .\patch.ps1 {enable|disable|uninstall|status|run|manual|watch}"
+        Write-Host "Usage: .\patch.ps1 {enable|disable|uninstall|status|run|retry|manual|watch|scheduled|help}"
         Write-Host ""
         Write-Host "Commands:"
         Write-Host "  enable      Register startup entry for auto-patching"
         Write-Host "  disable     Remove startup entry and stop watcher"
         Write-Host "  uninstall   Disable and remove all installed files"
-        Write-Host "  status      Show current status (incl. watcher and versions)"
-        Write-Host "  run         Execute the patch (creates pending if Chrome is running)"
+        Write-Host "  status      Show current status (incl. watcher and runtime state)"
+        Write-Host "  run         Execute the patch (creates/updates pending if Chrome is running)"
+        Write-Host "  retry       Retry pending install if conditions allow"
         Write-Host "  manual      Re-install immediately (offers to close Chrome)"
         Write-Host "  watch       Start registry watcher (runs as background daemon)"
+        Write-Host "  scheduled   Startup entrypoint (check state + ensure watch)"
     }
 }

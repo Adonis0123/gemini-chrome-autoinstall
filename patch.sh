@@ -170,7 +170,17 @@ disarm_active_lock_cleanup() {
 run_core_install() {
     log "Chrome is closed. Running Gemini-in-Chrome install script..."
     if [ -n "$CORE_INSTALL_CMD" ]; then
-        if sh -c "$CORE_INSTALL_CMD"; then
+        if [ ! -f "$CORE_INSTALL_CMD" ]; then
+            log "Install failed: GEMINI_CORE_INSTALL_CMD target '$CORE_INSTALL_CMD' does not exist."
+            return 1
+        fi
+
+        if [ ! -x "$CORE_INSTALL_CMD" ]; then
+            log "Install failed: GEMINI_CORE_INSTALL_CMD target '$CORE_INSTALL_CMD' is not executable."
+            return 1
+        fi
+
+        if "$CORE_INSTALL_CMD"; then
             log "Install completed successfully."
             return 0
         fi
@@ -541,7 +551,7 @@ cmd_manual() {
             log "Closing Chrome (user confirmed)..."
             killall "Google Chrome" 2>/dev/null
             local waited=0
-            while pgrep -x "Google Chrome" >/dev/null 2>&1; do
+            while is_chrome_running; do
                 if [ "$waited" -ge 30 ]; then
                     echo "Chrome did not exit in time. Please close it manually and retry."
                     return 1

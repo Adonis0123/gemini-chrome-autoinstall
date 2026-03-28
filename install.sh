@@ -12,6 +12,18 @@ SKIP_FIRST_PATCH="${GEMINI_SKIP_FIRST_PATCH:-0}"
 download_or_copy() {
     local rel_path="$1"
     local out_path="$2"
+    local base_local_path=""
+
+    if [ -d "$RAW_BASE" ]; then
+        base_local_path="$RAW_BASE/$rel_path"
+    elif [[ "$RAW_BASE" == /* || "$RAW_BASE" == ./* || "$RAW_BASE" == ../* ]]; then
+        base_local_path="$RAW_BASE/$rel_path"
+    fi
+
+    if [ -n "$base_local_path" ] && [ -f "$base_local_path" ]; then
+        cp "$base_local_path" "$out_path"
+        return 0
+    fi
 
     if curl -fsSL "$RAW_BASE/$rel_path" -o "$out_path"; then
         return 0

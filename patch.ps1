@@ -179,13 +179,36 @@ function Exit-ActiveLock {
 function Invoke-CoreInstall {
     Write-Log "Chrome is closed. Running Gemini-in-Chrome install script..."
     if ($CoreInstallCommand) {
+        $overrideTarget = $CoreInstallCommand.Trim()
+        if (-not $overrideTarget) {
+            Write-Log "Install failed: GEMINI_CORE_INSTALL_CMD is empty."
+            return $false
+        }
+
         try {
-            Invoke-Expression $CoreInstallCommand | Out-Null
+            $resolvedTarget = (Resolve-Path -LiteralPath $overrideTarget -ErrorAction Stop).Path
+        }
+        catch {
+            Write-Log "Install failed: GEMINI_CORE_INSTALL_CMD target '$overrideTarget' does not exist."
+            return $false
+        }
+
+        if (Test-Path -LiteralPath $resolvedTarget -PathType Container) {
+            Write-Log "Install failed: GEMINI_CORE_INSTALL_CMD target '$resolvedTarget' is a directory."
+            return $false
+        }
+
+        try {
+            & $resolvedTarget | Out-Null
+            if (-not $?) {
+                $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 1 }
+                throw "override exited with code $exitCode"
+            }
             Write-Log "Install completed successfully."
             return $true
         }
         catch {
-            Write-Log "Install failed: $_"
+            Write-Log "Install failed: GEMINI_CORE_INSTALL_CMD target '$resolvedTarget' error: $_"
             return $false
         }
     }

@@ -11,18 +11,47 @@ $global:Failures = 0
 function Invoke-Case {
   param(
     [string]$Name,
-    [scriptblock]$Action
+    [scriptblock]$Action,
+    [hashtable]$CaseEnv = @{}
   )
 
   if ($Case -and $Case -ne $Name) {
-    return
+    return 2
   }
 
   Write-Host "==> $Name"
 
+  $managedKeys = @(
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "GEMINI_INSTALL_DIR",
+    "GEMINI_LOCAL_STATE_PATH",
+    "GEMINI_CHROME_VERSION",
+    "GEMINI_CHROME_RUNNING",
+    "GEMINI_FAKE_INSTALL_MODE"
+  )
+
   $originalEnv = @{}
-  Get-ChildItem Env:GEMINI_* -ErrorAction SilentlyContinue | ForEach-Object {
-    $originalEnv[$_.Name] = $_.Value
+  foreach ($envName in $managedKeys) {
+    if (Test-Path "Env:$envName") {
+      $originalEnv[$envName] = (Get-Item "Env:$envName").Value
+    }
+    else {
+      $originalEnv[$envName] = $null
+    }
+  }
+
+  foreach ($envName in $CaseEnv.Keys) {
+    if (-not $managedKeys.Contains($envName)) {
+      continue
+    }
+    Set-Item -Path "Env:$envName" -Value $CaseEnv[$envName]
+    if ($envName -in @("USERPROFILE", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR")) {
+      New-Item -ItemType Directory -Force -Path $CaseEnv[$envName] | Out-Null
+    }
   }
 
   $caseExitCode = 0
@@ -30,7 +59,10 @@ function Invoke-Case {
 
   try {
     $caseOutput = & { & $Action } 2>&1 | Out-String
-    if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {
+    if (-not $?) {
+      $caseExitCode = 1
+    }
+    elseif ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) {
       $caseExitCode = $LASTEXITCODE
     }
   }
@@ -39,19 +71,13 @@ function Invoke-Case {
     $caseOutput = $_.Exception.Message
   }
   finally {
-    $currentEnv = @{}
-    Get-ChildItem Env:GEMINI_* -ErrorAction SilentlyContinue | ForEach-Object {
-      $currentEnv[$_.Name] = $_.Value
-    }
-
-    foreach ($envName in $currentEnv.Keys) {
-      if (-not $originalEnv.ContainsKey($envName)) {
+    foreach ($envName in $managedKeys) {
+      if ($null -eq $originalEnv[$envName]) {
         Remove-Item -Path "Env:$envName" -ErrorAction SilentlyContinue
       }
-    }
-
-    foreach ($envName in $originalEnv.Keys) {
-      Set-Item -Path "Env:$envName" -Value $originalEnv[$envName]
+      else {
+        Set-Item -Path "Env:$envName" -Value $originalEnv[$envName]
+      }
     }
   }
 
@@ -62,6 +88,8 @@ function Invoke-Case {
     }
     $global:Failures++
   }
+
+  return $caseExitCode
 }
 
 function Assert-Contains {
@@ -98,22 +126,38 @@ function Assert-FileContains {
 try {
   New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 
+  $statusCaseRoot = Join-Path $RunRoot "status-shows-tool-version"
+  $statusEnv = @{
+    "USERPROFILE" = Join-Path $statusCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $statusCaseRoot "localappdata"
+    "TEMP" = Join-Path $statusCaseRoot "temp"
+    "TMP" = Join-Path $statusCaseRoot "temp"
+    "TMPDIR" = Join-Path $statusCaseRoot "temp"
+  }
   Invoke-Case "status-shows-tool-version" {
     $scriptOutput = & "$RepoRoot\patch.ps1" status | Out-String
     Assert-Contains $scriptOutput "Tool version:"
+  } -CaseEnv $statusEnv
+
+  $triCaseRoot = Join-Path $RunRoot "tri-state-healthy"
+  $triRuntimeRoot = Join-Path $triCaseRoot "runtime"
+  $triEnv = @{
+    "USERPROFILE" = Join-Path $triCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $triCaseRoot "localappdata"
+    "TEMP" = Join-Path $triCaseRoot "temp"
+    "TMP" = Join-Path $triCaseRoot "temp"
+    "TMPDIR" = Join-Path $triCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $triRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
   }
 
   Invoke-Case "tri-state-healthy" {
-    $workRoot = Join-Path $RunRoot "tri-state-healthy"
-    $runtimeRoot = Join-Path $workRoot "runtime"
-    New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
-    $env:GEMINI_INSTALL_DIR = $runtimeRoot
-    $env:GEMINI_LOCAL_STATE_PATH = Join-Path $FixtureDir "healthy.json"
-    $env:GEMINI_CHROME_VERSION = "136.0.7103.49"
-    $env:GEMINI_CHROME_RUNNING = "0"
+    New-Item -ItemType Directory -Force -Path $triRuntimeRoot | Out-Null
     & "$RepoRoot\patch.ps1" run | Out-Null
-    Assert-FileContains (Join-Path $runtimeRoot "last-result") "status=healthy"
-  }
+    Assert-FileContains (Join-Path $triRuntimeRoot "last-result") "status=healthy"
+  } -CaseEnv $triEnv
 
   if ($Failures -gt 0) {
     Write-Host "FAILED: $Failures checks failed."

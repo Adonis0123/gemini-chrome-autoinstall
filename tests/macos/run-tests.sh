@@ -23,9 +23,11 @@ run_case() {
   fi
 
   echo "==> ${case_name}"
+  local case_home="$TMP_ROOT/home/${case_name}"
+  mkdir -p "$case_home/Library/Logs"
 
   set +e
-  CASE_OUTPUT="$(cd "$REPO_ROOT" && "$@" 2>&1)"
+  CASE_OUTPUT="$(cd "$REPO_ROOT" && HOME="$case_home" "$@" 2>&1)"
   local command_exit=$?
   set -e
 
@@ -37,6 +39,8 @@ run_case() {
     echo
     FAILURES=$((FAILURES + 1))
   fi
+
+  return "${command_exit}"
 }
 
 assert_contains() {

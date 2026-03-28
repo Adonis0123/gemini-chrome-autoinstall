@@ -127,6 +127,24 @@ if run_case "tri-state-drifted-country" env \
   assert_file_contains "$TMPDIR/runtime/tri-state-drifted-country/last-result" "status=healthy"
 fi
 
+if run_case "status-drifted-permanent-country-while-running" env \
+  GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/drifted-permanent-country.json" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh status; then
+  assert_contains "${CASE_OUTPUT}" "Current state: drifted"
+fi
+
+if run_case "tri-state-unknown-missing-glic" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime/tri-state-unknown-missing-glic" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/runtime/tri-state-unknown-missing-glic/local-state.json" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash -c "mkdir -p \"$TMPDIR/runtime/tri-state-unknown-missing-glic\" && printf '%s\n' '{' '  \"variations_country\": \"us\",' '  \"variations_permanent_consistency_country\": [\"seed\", \"us\"],' '  \"profile\": {' '    \"info_cache\": {' '      \"Default\": {}' '    }' '  }' '}' > \"$TMPDIR/runtime/tri-state-unknown-missing-glic/local-state.json\" && bash patch.sh run"; then
+  assert_file_contains "$TMPDIR/runtime/tri-state-unknown-missing-glic/last-result" "status=detect_error"
+  assert_file_contains "$TMPDIR/runtime/tri-state-unknown-missing-glic/last-result" "reason=missing_required_fields"
+fi
+
 if run_case "tri-state-unknown-invalid-json" env \
   GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
   GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/unknown-invalid.json" \

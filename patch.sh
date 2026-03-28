@@ -264,13 +264,23 @@ detect_patch_state() {
     local permanent_country
     permanent_country=$(sed -n 's/.*"variations_permanent_consistency_country"[[:space:]]*:[[:space:]]*\[[^]]*"\([^"]*\)"\][[:space:]]*.*/\1/p' "$LOCAL_STATE_FILE" | head -n 1)
 
-    if [ -z "$variations_country" ] || [ -z "$permanent_country" ]; then
+    local has_glic_true="0"
+    if grep -Eq '"is_glic_eligible"[[:space:]]*:[[:space:]]*true' "$LOCAL_STATE_FILE"; then
+        has_glic_true="1"
+    fi
+
+    local has_glic_false="0"
+    if grep -Eq '"is_glic_eligible"[[:space:]]*:[[:space:]]*false' "$LOCAL_STATE_FILE"; then
+        has_glic_false="1"
+    fi
+
+    if [ -z "$variations_country" ] || [ -z "$permanent_country" ] || { [ "$has_glic_true" = "0" ] && [ "$has_glic_false" = "0" ]; }; then
         echo "unknown|missing_required_fields"
     elif [ "$variations_country" != "us" ]; then
         echo "drifted|variations_country=$variations_country"
     elif [ "$permanent_country" != "us" ]; then
         echo "drifted|variations_permanent_consistency_country=$permanent_country"
-    elif grep -Eq '"is_glic_eligible"[[:space:]]*:[[:space:]]*false' "$LOCAL_STATE_FILE"; then
+    elif [ "$has_glic_false" = "1" ]; then
         echo "drifted|glic_not_eligible"
     else
         echo "healthy|ok"
@@ -294,7 +304,7 @@ resolve_state_mapping() {
         current_state="pending"
     elif [ "$detect_state" = "healthy" ]; then
         current_state="healthy"
-    elif [ "$detect_state" = "drifted" ] && [ "$chrome_running" = "0" ]; then
+    elif [ "$detect_state" = "drifted" ]; then
         current_state="drifted"
     else
         current_state="unknown"

@@ -1,202 +1,170 @@
 # Gemini Chrome AutoInstall
 
-When Chrome updates and removes the [Gemini-in-Chrome](https://github.com/appsail/Gemini-in-Chrome) extension, this tool helps you bring it back with one command. On macOS it watches the Chrome app and auto-reinstalls in the background; on Windows it monitors the Chrome registry key for version changes and also gives you a fast manual recovery command.
+`gemini-chrome-autoinstall` is a cross-platform self-healing wrapper around [Gemini-in-Chrome](https://github.com/appsail/Gemini-in-Chrome).
+
+Its real job is not “reinstalling an extension after every update.” It watches for Chrome version changes and `Local State` drift, then repairs the relevant `Local State` values when it is safe to write. If Chrome is still open, it records `pending` and waits for a later retry instead of forcing a patch.
 
 ## Install
 
-**macOS** — open Terminal and run:
+**macOS**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.sh | bash
 ```
 
-**Windows** — open PowerShell and run:
+**Windows**
 
 ```powershell
 irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.ps1 | iex
 ```
 
-Done.
-
-- **macOS**: it will keep watching Chrome updates in the background.
-- **Windows**: it monitors Chrome version changes via registry watcher in real time. A manual fix command is also available. Restart PowerShell to use the shortcut functions.
+After installation, the success output shows the installed tool version.
 
 ## Quick Shortcuts
 
-After installation, two shortcut commands are available on both platforms:
-
 | Command | Action |
 |---------|--------|
-| `gemini-chrome-fix` | Re-install the extension (offers to close Chrome if running) |
-| `gemini-chrome-status` | Check current status |
+| `gemini-chrome-fix` | Run the manual repair flow |
+| `gemini-chrome-status` | Show runtime status, version info, and pending state |
 
-### macOS: add zsh commands
+### macOS shell shortcuts
 
-Add this to `~/.zshrc`:
-
-```bash
-gemini-chrome-fix() { $HOME/.gemini-chrome-autoinstall/patch.sh manual; }
-```
+Add these to `~/.zshrc`:
 
 ```bash
-gemini-chrome-status() { $HOME/.gemini-chrome-autoinstall/patch.sh status; }
+gemini-chrome-fix() { "$HOME/.gemini-chrome-autoinstall/patch.sh" manual; }
+gemini-chrome-status() { "$HOME/.gemini-chrome-autoinstall/patch.sh" status; }
 ```
 
-Then reload: `source ~/.zshrc`
+Reload your shell:
 
-### Windows: PowerShell shortcut commands
+```bash
+source ~/.zshrc
+```
 
-These are **registered automatically** during installation. After restarting PowerShell, you can use them directly:
+### Windows PowerShell shortcuts
+
+The installer appends these functions to your PowerShell profile automatically:
 
 ```powershell
-gemini-chrome-fix       # Re-install the extension
+gemini-chrome-fix
+gemini-chrome-status
 ```
 
-```powershell
-gemini-chrome-status    # Check current status
-```
-
-If they are missing (e.g. you reinstalled PowerShell or reset your profile), add them manually:
+If your profile was reset, add them manually:
 
 ```powershell
 if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-```
-
-```powershell
 Add-Content $PROFILE "`nfunction gemini-chrome-fix { & `"`$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1`" manual }"
-```
-
-```powershell
 Add-Content $PROFILE "function gemini-chrome-status { & `"`$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1`" status }"
-```
-
-```powershell
 . $PROFILE
 ```
 
-## Uninstall
+## Runtime Model
 
-**macOS:**
+The tool treats `Local State` as the source of truth.
 
-```bash
-~/.gemini-chrome-autoinstall/patch.sh uninstall
-```
+- `healthy`: required fields already match the expected Gemini-in-Chrome state
+- `drifted`: Chrome state has moved away from the expected patched values
+- `unknown`: the tool cannot prove health because the file is missing, malformed, or missing required fields
+- `pending`: drift has been detected, but Chrome is still open or a retry is still in progress
 
-**Windows:**
-
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
-```
-
-> Note: uninstall removes the startup entry and script files but does not remove the shortcut functions from your PowerShell profile. To clean those up, edit `$PROFILE` manually.
+The automatic path never forces a write while Chrome is open. Instead it records metadata in `pending`, keeps retry context, and retries later.
 
 ## How It Works
 
 ### macOS
 
-Two background agents are registered:
+Four LaunchAgents cooperate:
 
-- **Boot agent** — runs once after every login
-- **Watcher agent** — detects Chrome updates by watching `/Applications/Google Chrome.app/Contents/Info.plist`
+- `com.gemini-chrome-autoinstall.boot` runs `patch.sh run` at login
+- `com.gemini-chrome-autoinstall.watcher` reacts to Chrome app metadata changes
+- `com.gemini-chrome-autoinstall.retry` retries while a `pending` file exists
+- `com.gemini-chrome-autoinstall.fallback` runs a low-frequency reconcile pass every 30 minutes
 
-When triggered, the script waits for Chrome to close, then re-installs the extension.
+Automatic flow:
+
+1. A trigger runs `patch.sh run`
+2. The script inspects Chrome version plus `Local State`
+3. If state is `healthy`, it clears stale `pending` and records the healthy version
+4. If state is `drifted` and Chrome is open, it records `pending`
+5. If state is `drifted` and Chrome is closed, it runs the upstream installer and verifies the result
+6. If patching fails or verification still does not return `healthy`, it records a failure state and points the user to `gemini-chrome-fix`
 
 ### Windows
 
-A startup entry (HKCU Registry Run key) launches the watcher at logon. The background **registry watcher** monitors `HKCU:\Software\Google\Chrome\BLBeacon\version` for changes using the Win32 `RegNotifyChangeKeyValue` API (blocking, zero CPU usage). When a version change is detected, it automatically triggers the patch. No admin privileges are required.
+Windows uses a login startup entry plus a background registry watcher.
 
-### Safety
+- Startup entry: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\GeminiChromeAutoPatch`
+- Watch source: `HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}\pv`
+- Background watcher command: `patch.ps1 watch`
+- Startup entrypoint: `patch.ps1 scheduled`
 
-- Waits for Chrome to close before patching (up to 10 min)
-- `manual` command offers to close Chrome for you (with confirmation)
-- Lock file prevents repeated runs within 5 minutes
-- Manual fix command is available on both platforms when you want to re-install immediately
+The watcher treats version changes as a signal to reconcile, not as proof that patching is needed. `Local State` remains the final health check.
 
-## All Commands
+## Status Output
 
-**macOS:**
+`gemini-chrome-status` shows version, runtime state, and pending metadata.
+
+Example:
+
+```text
+Tool version: v0.1.2
+Chrome version: 136.0.7103.49
+Last healthy version: 136.0.7103.49
+Current state: pending
+Pending reason: blocked
+Pending patch reason: variations_country=cn
+Pending retry count: 4
+Pending age: 240s
+Last attempt: 2026-03-29T08:00:00Z
+```
+
+This makes it easy to distinguish:
+
+- everything is already healthy
+- drift has been detected
+- Chrome is still open, so repair is deferred
+- detection failed and manual recovery is needed
+- automatic repair failed or verification failed
+
+## Commands
+
+### macOS
 
 ```bash
-~/.gemini-chrome-autoinstall/patch.sh status      # Check if it's running
+~/.gemini-chrome-autoinstall/patch.sh enable
+~/.gemini-chrome-autoinstall/patch.sh disable
+~/.gemini-chrome-autoinstall/patch.sh status
+~/.gemini-chrome-autoinstall/patch.sh run
+~/.gemini-chrome-autoinstall/patch.sh retry
+~/.gemini-chrome-autoinstall/patch.sh manual
+~/.gemini-chrome-autoinstall/patch.sh uninstall
 ```
 
-```bash
-~/.gemini-chrome-autoinstall/patch.sh run          # Patch now (waits for Chrome to close)
-```
-
-```bash
-~/.gemini-chrome-autoinstall/patch.sh manual       # Re-install now (offers to close Chrome)
-```
-
-```bash
-~/.gemini-chrome-autoinstall/patch.sh disable      # Stop auto-patching (keep files)
-```
-
-```bash
-~/.gemini-chrome-autoinstall/patch.sh enable       # Re-enable auto-patching
-```
-
-```bash
-~/.gemini-chrome-autoinstall/patch.sh uninstall    # Remove everything
-```
-
-**Windows:**
-
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
-```
-
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" run
-```
-
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual
-```
-
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" disable
-```
+### Windows
 
 ```powershell
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" enable
-```
-
-```powershell
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" disable
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" run
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" retry
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" watch
+& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" scheduled
 & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" uninstall
 ```
 
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" watch
-```
+## Manual Recovery
 
-## Manual Fix
-
-If you already closed Chrome and want to run the core installer right now:
-
-**macOS**
+If automatic repair reports `patch_failed`, `verify_failed`, or `detect_error`, run:
 
 ```bash
-~/.gemini-chrome-autoinstall/patch.sh manual
+gemini-chrome-fix
 ```
 
-This runs:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh | bash
-```
-
-**Windows**
-
-```powershell
-& "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual
-```
-
-This runs:
-
-```powershell
-irm https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1 | iex
-```
+That keeps the recovery path predictable and gives you a stable manual escape hatch even if automatic reconciliation cannot converge.
 
 ## Logs
 

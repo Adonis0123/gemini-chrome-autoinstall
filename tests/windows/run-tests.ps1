@@ -7,6 +7,7 @@ $FixtureDir = Join-Path $RepoRoot "tests\fixtures\local-state"
 $RunRoot = Join-Path $env:TEMP ("gemini-chrome-autoinstall-tests-" + [guid]::NewGuid().ToString())
 
 $global:Failures = 0
+$global:CasesRun = 0
 
 function Invoke-Case {
   param(
@@ -20,6 +21,7 @@ function Invoke-Case {
   }
 
   Write-Host "==> $Name"
+  $global:CasesRun++
 
   $managedKeys = @(
     "USERPROFILE",
@@ -158,6 +160,11 @@ try {
     & "$RepoRoot\patch.ps1" run | Out-Null
     Assert-FileContains (Join-Path $triRuntimeRoot "last-result") "status=healthy"
   } -CaseEnv $triEnv
+
+  if ($Case -and $CasesRun -eq 0) {
+    Write-Host "[FAIL] unknown test case: $Case"
+    exit 1
+  }
 
   if ($Failures -gt 0) {
     Write-Host "FAILED: $Failures checks failed."

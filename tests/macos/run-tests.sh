@@ -13,6 +13,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 TEST_CASE="${1:-}"
 FAILURES=0
 CASE_OUTPUT=""
+CASES_RUN=0
 
 run_case() {
   local case_name="$1"
@@ -23,6 +24,7 @@ run_case() {
   fi
 
   echo "==> ${case_name}"
+  CASES_RUN=$((CASES_RUN + 1))
   local case_home="$TMP_ROOT/home/${case_name}"
   mkdir -p "$case_home/Library/Logs"
 
@@ -79,17 +81,22 @@ if run_case "status-shows-tool-version" env bash patch.sh status; then
   assert_contains "${CASE_OUTPUT}" "Tool version:"
 fi
 
+TRI_STATE_RUNTIME_DIR="$TMP_ROOT/runtime/tri-state-healthy"
 if run_case "tri-state-healthy" env \
-  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
+  GEMINI_INSTALL_DIR="$TRI_STATE_RUNTIME_DIR" \
   GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/healthy.json" \
   GEMINI_CHROME_VERSION="136.0.7103.49" \
   GEMINI_CHROME_RUNNING="0" \
   bash patch.sh run; then
-  assert_file_contains "$TMPDIR/runtime/last-result" "status=healthy"
+  assert_file_contains "$TRI_STATE_RUNTIME_DIR/last-result" "status=healthy"
 fi
 
 if [[ "${TEST_CASE}" != "" ]]; then
   echo "[INFO] requested case: ${TEST_CASE}"
+  if [[ "${CASES_RUN}" -eq 0 ]]; then
+    echo "[FAIL] unknown test case: ${TEST_CASE}"
+    exit 1
+  fi
 fi
 
 if [[ "${FAILURES}" -gt 0 ]]; then

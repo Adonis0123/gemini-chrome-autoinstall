@@ -93,6 +93,17 @@ assert_file_contains() {
   fi
 }
 
+assert_file_missing() {
+  local file_path="$1"
+
+  if [[ -f "${file_path}" ]]; then
+    echo "[FAIL] expected file to be missing: ${file_path}"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo "[PASS] file is missing: ${file_path}"
+  fi
+}
+
 if run_case "status-shows-tool-version" env bash patch.sh status; then
   assert_contains "${CASE_OUTPUT}" "Tool version:"
 fi
@@ -152,6 +163,50 @@ if run_case "tri-state-unknown-invalid-json" env \
   GEMINI_CHROME_RUNNING="0" \
   bash patch.sh run; then
   assert_file_contains "$TMPDIR/runtime/last-result" "status=detect_error"
+fi
+
+if run_case "chrome-running-creates-pending" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
+  GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/drifted-variations-country.json" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh run; then
+  assert_file_contains "$TMPDIR/runtime/pending" "reason=blocked"
+  assert_file_contains "$TMPDIR/runtime/last-result" "status=blocked"
+fi
+
+if run_case "pending-settles-after-close" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/runtime/Local State" \
+  GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+  GEMINI_FAKE_INSTALL_MODE="success" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh retry; then
+  assert_file_missing "$TMPDIR/runtime/pending"
+  assert_file_contains "$TMPDIR/runtime/last-result" "status=healthy"
+fi
+
+if run_case "patch-failure-recorded" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
+  GEMINI_LOCAL_STATE_PATH="$FIXTURE_DIR/drifted-glic-false.json" \
+  GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+  GEMINI_FAKE_INSTALL_MODE="patch_fail" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$TMPDIR/runtime/last-result" "status=patch_failed"
+fi
+
+if run_case "verify-failure-recorded" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/runtime/verify-failure" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/runtime/verify-failure/local-state.json" \
+  GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+  GEMINI_FAKE_INSTALL_MODE="verify_fail" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash -c "mkdir -p \"$TMPDIR/runtime/verify-failure\" && cp \"$FIXTURE_DIR/drifted-glic-false.json\" \"$TMPDIR/runtime/verify-failure/local-state.json\" && bash patch.sh run"; then
+  assert_file_contains "$TMPDIR/runtime/verify-failure/last-result" "status=verify_failed"
 fi
 
 if [[ "${#TEST_CASES[@]}" -gt 0 ]]; then

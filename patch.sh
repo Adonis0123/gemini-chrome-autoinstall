@@ -6,9 +6,11 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 BOOT_LABEL="com.gemini-chrome-autoinstall.boot"
 WATCHER_LABEL="com.gemini-chrome-autoinstall.watcher"
 RETRY_LABEL="com.gemini-chrome-autoinstall.retry"
+FALLBACK_LABEL="com.gemini-chrome-autoinstall.fallback"
 BOOT_PLIST="$BOOT_LABEL.plist"
 WATCHER_PLIST="$WATCHER_LABEL.plist"
 RETRY_PLIST="$RETRY_LABEL.plist"
+FALLBACK_PLIST="$FALLBACK_LABEL.plist"
 INSTALL_DIR="${GEMINI_INSTALL_DIR:-$HOME/.gemini-chrome-autoinstall}"
 PENDING_FILE="$INSTALL_DIR/pending"
 PATCHED_VERSION_FILE="$INSTALL_DIR/patched-version.txt"
@@ -52,15 +54,17 @@ get_last_result_field() {
 
 write_pending_metadata() {
     local reason="$1"
-    local first_seen_at="$2"
-    local last_attempt_at="$3"
-    local retry_count="$4"
-    local detected_version="$5"
+    local patch_reason="$2"
+    local first_seen_at="$3"
+    local last_attempt_at="$4"
+    local retry_count="$5"
+    local detected_version="$6"
 
     mkdir -p "$(dirname "$PENDING_FILE")"
     cat > "$PENDING_FILE" <<EOF
 pending
 reason=${reason}
+patch_reason=${patch_reason}
 first_seen_at=${first_seen_at}
 last_attempt_at=${last_attempt_at}
 retry_count=${retry_count}
@@ -82,6 +86,19 @@ get_pending_retry_count() {
     else
         echo "0"
     fi
+}
+
+get_pending_patch_reason() {
+    local patch_reason
+    patch_reason=$(get_pending_field "patch_reason")
+    if [ -n "$patch_reason" ]; then
+        echo "$patch_reason"
+        return 0
+    fi
+
+    local pending_reason
+    pending_reason=$(get_pending_field "reason")
+    echo "${pending_reason:-unknown}"
 }
 
 calculate_pending_age() {
@@ -129,6 +146,15 @@ chrome_version=${chrome_version}
 tool_version=$(get_tool_version)
 hint=${hint}
 EOF
+}
+
+get_chrome_version_or_unknown() {
+    local chrome_ver
+    chrome_ver=$(get_chrome_version)
+    if [ -z "$chrome_ver" ]; then
+        chrome_ver="unknown"
+    fi
+    printf '%s' "$chrome_ver"
 }
 
 is_chrome_running() {
@@ -322,7 +348,9 @@ save_patched_version() {
     printf '%s' "$1" > "$PATCHED_VERSION_FILE"
 }
 
-create_pending() {
+upsert_pending_record() {
+    local reason="$1"
+    local patch_reason="$2"
     local now
     now=$(timestamp_now)
     local first_seen_at
@@ -334,12 +362,112 @@ create_pending() {
     retry_count=$(( $(get_pending_retry_count) + 1 ))
     local detected_version
     detected_version="${NEEDS_PATCH_CHROME_VERSION:-$(get_chrome_version)}"
-    write_pending_metadata "chrome_running" "$first_seen_at" "$now" "$retry_count" "$detected_version"
-    log "Chrome is running. Created pending flag for deferred install."
+    if [ -z "$detected_version" ]; then
+        detected_version="unknown"
+    fi
+    write_pending_metadata "$reason" "$patch_reason" "$first_seen_at" "$now" "$retry_count" "$detected_version"
+}
+
+should_attempt_retry_now() {
+    local retry_count="$1"
+    if [ "$retry_count" -lt 10 ]; then
+        return 0
+    fi
+    [ $(( retry_count % 5 )) -eq 0 ]
 }
 
 remove_pending() {
     rm -f "$PENDING_FILE"
+}
+
+perform_patch_and_verify() {
+    local patch_reason="$1"
+    local chrome_ver
+    chrome_ver=$(get_chrome_version_or_unknown)
+
+    if ! acquire_active_lock; then
+        upsert_pending_record "active_lock_busy" "$patch_reason"
+        write_last_result "blocked" "active_lock_busy" "$chrome_ver" "another run in progress"
+        return 0
+    fi
+    arm_active_lock_cleanup
+
+    if ! run_core_install; then
+        upsert_pending_record "patch_failed" "$patch_reason"
+        write_last_result "patch_failed" "$patch_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+        disarm_active_lock_cleanup
+        release_active_lock
+        return 0
+    fi
+
+    local verify_result
+    verify_result=$(detect_patch_state)
+    local verify_state="${verify_result%%|*}"
+    local verify_reason="${verify_result#*|}"
+
+    if [ "$verify_state" != "healthy" ]; then
+        upsert_pending_record "verify_failed" "$verify_reason"
+        write_last_result "verify_failed" "$verify_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+        disarm_active_lock_cleanup
+        release_active_lock
+        return 0
+    fi
+
+    local installed_chrome_ver
+    installed_chrome_ver=$(get_chrome_version_or_unknown)
+    if [ "$installed_chrome_ver" != "unknown" ]; then
+        save_patched_version "$installed_chrome_ver"
+    fi
+    remove_pending
+    write_last_result "healthy" "$verify_reason" "$installed_chrome_ver" ""
+
+    disarm_active_lock_cleanup
+    release_active_lock
+    return 0
+}
+
+reconcile_patch_state() {
+    local trigger="$1"
+    local patch_state patch_reason
+    IFS='|' read -r patch_state patch_reason <<< "$(detect_patch_state)"
+
+    local chrome_ver
+    chrome_ver=$(get_chrome_version_or_unknown)
+    NEEDS_PATCH_CHROME_VERSION="$chrome_ver"
+
+    case "$patch_state" in
+        healthy)
+            if [ "$chrome_ver" != "unknown" ]; then
+                save_patched_version "$chrome_ver"
+            fi
+            remove_pending
+            write_last_result "healthy" "$patch_reason" "$chrome_ver" ""
+            return 0
+            ;;
+        unknown)
+            if [ "$trigger" = "retry" ] && [ -f "$PENDING_FILE" ]; then
+                local pending_patch_reason
+                pending_patch_reason=$(get_pending_patch_reason)
+                perform_patch_and_verify "$pending_patch_reason"
+                return $?
+            fi
+            write_last_result "detect_error" "$patch_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+            return 1
+            ;;
+        drifted)
+            if is_chrome_running; then
+                upsert_pending_record "blocked" "$patch_reason"
+                write_last_result "blocked" "$patch_reason" "$chrome_ver" "Chrome 关闭后将自动修复"
+                return 0
+            fi
+            perform_patch_and_verify "$patch_reason"
+            return $?
+            ;;
+        *)
+            write_last_result "detect_error" "unknown_patch_state:$patch_state" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+            return 1
+            ;;
+    esac
 }
 
 cmd_enable() {
@@ -349,6 +477,7 @@ cmd_enable() {
     launchctl unload "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" 2>/dev/null || true
     launchctl unload "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST" 2>/dev/null || true
     launchctl unload "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" 2>/dev/null || true
+    launchctl unload "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST" 2>/dev/null || true
 
     cat > "$LAUNCH_AGENTS_DIR/$BOOT_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -420,12 +549,33 @@ EOF
 </plist>
 EOF
 
+    cat > "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${FALLBACK_LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${SCRIPT_DIR}/patch.sh</string>
+		<string>run</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+	<key>StandardErrorPath</key>
+	<string>${LOG_FILE}</string>
+</dict>
+</plist>
+EOF
+
     launchctl load "$LAUNCH_AGENTS_DIR/$BOOT_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
+    launchctl load "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
 
-    log "Enabled: all LaunchAgents loaded."
-    echo "Done. All LaunchAgents are now enabled."
+    log "Enabled: boot/watcher/retry/fallback LaunchAgents loaded."
+    echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now enabled."
 }
 
 cmd_disable() {
@@ -444,16 +594,18 @@ cmd_disable() {
         rm -f "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
     fi
 
-    log "Disabled: all LaunchAgents unloaded and removed."
-    echo "Done. All LaunchAgents are now disabled."
+    if [ -f "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST" ]; then
+        launchctl unload "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST" 2>/dev/null || true
+        rm -f "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
+    fi
+
+    log "Disabled: boot/watcher/retry/fallback LaunchAgents unloaded and removed."
+    echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now disabled."
 }
 
 cmd_status() {
     local chrome_ver
-    chrome_ver=$(get_chrome_version)
-    if [ -z "$chrome_ver" ]; then
-        chrome_ver="unknown"
-    fi
+    chrome_ver=$(get_chrome_version_or_unknown)
 
     local patched_ver
     patched_ver=$(get_patched_version)
@@ -485,8 +637,17 @@ cmd_status() {
         pending_reason="none"
     fi
 
+    local pending_patch_reason
+    pending_patch_reason=$(get_pending_field "patch_reason")
+    if [ -z "$pending_patch_reason" ]; then
+        pending_patch_reason="none"
+    fi
+
     local pending_age
     pending_age=$(calculate_pending_age)
+
+    local pending_retry_count
+    pending_retry_count=$(get_pending_retry_count)
 
     local last_attempt
     last_attempt=$(get_pending_field "last_attempt_at")
@@ -497,13 +658,21 @@ cmd_status() {
         last_attempt="never"
     fi
 
+    local fallback_agent_state="disabled"
+    if [ -f "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST" ]; then
+        fallback_agent_state="enabled"
+    fi
+
     echo "Tool version: $(get_tool_version)"
     echo "Chrome version: ${chrome_ver}"
     echo "Last healthy version: ${patched_ver}"
     echo "Current state: ${current_state}"
     echo "Pending reason: ${pending_reason}"
+    echo "Pending patch reason: ${pending_patch_reason}"
+    echo "Pending retry count: ${pending_retry_count}"
     echo "Pending age: ${pending_age}"
     echo "Last attempt: ${last_attempt}"
+    echo "Fallback agent: ${fallback_agent_state} (30m interval)"
 }
 
 cmd_uninstall() {
@@ -516,66 +685,7 @@ cmd_uninstall() {
 
 cmd_run() {
     log "Run triggered."
-
-    local chrome_ver
-    chrome_ver=$(get_chrome_version)
-    if [ -z "$chrome_ver" ]; then
-        chrome_ver="unknown"
-    fi
-    NEEDS_PATCH_CHROME_VERSION="$chrome_ver"
-
-    local detect_result
-    detect_result=$(detect_patch_state)
-    local detect_state="${detect_result%%|*}"
-    local detect_reason="${detect_result#*|}"
-
-    local initial_mapping
-    initial_mapping=$(resolve_state_mapping "$detect_state" "0" "0")
-    local result_status="${initial_mapping%%|*}"
-
-    case "$detect_state" in
-        healthy)
-            remove_pending
-            if [ "$chrome_ver" != "unknown" ]; then
-                save_patched_version "$chrome_ver"
-            fi
-            write_last_result "healthy" "$detect_reason" "$chrome_ver" "local state verified"
-            ;;
-        drifted)
-            if is_chrome_running; then
-                create_pending
-                write_last_result "pending" "chrome_running" "$chrome_ver" "close Chrome and wait for retry"
-            else
-                if ! acquire_active_lock; then
-                    write_last_result "unknown" "active_lock_busy" "$chrome_ver" "another run in progress"
-                    return 0
-                fi
-                arm_active_lock_cleanup
-
-                local status=0
-                if run_core_install; then
-                    local installed_chrome_ver
-                    installed_chrome_ver=$(get_chrome_version)
-                    if [ -z "$installed_chrome_ver" ]; then
-                        installed_chrome_ver="$chrome_ver"
-                    fi
-                    remove_pending
-                    save_patched_version "$installed_chrome_ver"
-                    write_last_result "healthy" "patched" "$installed_chrome_ver" "patched successfully"
-                else
-                    status=1
-                    write_last_result "unknown" "core_install_failed" "$chrome_ver" "check core installer output"
-                fi
-
-                disarm_active_lock_cleanup
-                release_active_lock
-                return $status
-            fi
-            ;;
-        *)
-            write_last_result "$result_status" "$detect_reason" "$chrome_ver" "local state detection failed"
-            ;;
-    esac
+    reconcile_patch_state "run" || true
 
     return 0
 }
@@ -586,25 +696,29 @@ cmd_retry() {
     fi
 
     log "Retry: pending install found."
-    NEEDS_PATCH_CHROME_VERSION="${NEEDS_PATCH_CHROME_VERSION:-$(get_chrome_version)}"
+    NEEDS_PATCH_CHROME_VERSION="$(get_chrome_version_or_unknown)"
+
+    local pending_patch_reason
+    pending_patch_reason=$(get_pending_patch_reason)
 
     if is_chrome_running; then
-        local now
-        now=$(timestamp_now)
-        local first_seen_at
-        first_seen_at=$(get_pending_field "first_seen_at")
-        if [ -z "$first_seen_at" ]; then
-            first_seen_at="$now"
-        fi
-        local retry_count
-        retry_count=$(( $(get_pending_retry_count) + 1 ))
-        write_pending_metadata "chrome_running" "$first_seen_at" "$now" "$retry_count" "${NEEDS_PATCH_CHROME_VERSION:-$(get_chrome_version)}"
+        upsert_pending_record "blocked" "$pending_patch_reason"
         log "Retry: Chrome still running. Will retry later."
-        write_last_result "pending" "chrome_running" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "retry scheduled"
+        write_last_result "blocked" "$pending_patch_reason" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "Chrome 关闭后将自动修复"
         return 0
     fi
 
-    cmd_run
+    local retry_count
+    retry_count=$(get_pending_retry_count)
+    if ! should_attempt_retry_now "$retry_count"; then
+        upsert_pending_record "backoff_wait" "$pending_patch_reason"
+        write_last_result "blocked" "retry_backoff" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "等待下一次自动重试窗口"
+        log "Retry throttled by internal backoff (retry_count=${retry_count})."
+        return 0
+    fi
+
+    reconcile_patch_state "retry" || true
+    return 0
 }
 
 cmd_manual() {
@@ -671,12 +785,12 @@ case "${1:-help}" in
         echo "Usage: $0 {enable|disable|uninstall|status|run|retry|manual}"
         echo ""
         echo "Commands:"
-        echo "  enable      Install and load LaunchAgents"
-        echo "  disable     Unload and remove LaunchAgents"
+        echo "  enable      Install and load boot/watcher/retry/fallback LaunchAgents"
+        echo "  disable     Unload and remove all LaunchAgents"
         echo "  uninstall   Disable and remove all installed files"
         echo "  status      Show current status"
-        echo "  run         Execute the patch (creates pending if Chrome is running)"
-        echo "  retry       Retry pending install (called by KeepAlive agent)"
+        echo "  run         Reconcile local state (creates/updates pending if blocked)"
+        echo "  retry       Retry pending reconcile (called by KeepAlive agent)"
         echo "  manual      Re-install immediately after you close Chrome"
         exit 1
         ;;

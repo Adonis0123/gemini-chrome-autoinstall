@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - codex-state-driven-autopatch
+      - codex-state-driven-autopatch-ready
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run macOS tests
+        if: runner.os == 'macOS'
+        run: bash tests/macos/run-tests.sh
+
+      - name: Run Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows/run-tests.ps1

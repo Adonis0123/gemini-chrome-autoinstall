@@ -4,8 +4,10 @@ $Repo = "Adonis0123/gemini-chrome-autoinstall"
 $Branch = "master"
 $RawBase = if ($env:GEMINI_RAW_BASE) { $env:GEMINI_RAW_BASE } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
 $InstallDir = if ($env:GEMINI_INSTALL_DIR) { $env:GEMINI_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".gemini-chrome-autoinstall" }
-$SkipEnable = (if ($env:GEMINI_SKIP_ENABLE) { $env:GEMINI_SKIP_ENABLE } else { "0" }) -eq "1"
-$SkipFirstPatch = (if ($env:GEMINI_SKIP_FIRST_PATCH) { $env:GEMINI_SKIP_FIRST_PATCH } else { "0" }) -eq "1"
+$SkipEnableValue = if ($env:GEMINI_SKIP_ENABLE) { $env:GEMINI_SKIP_ENABLE } else { "0" }
+$SkipFirstPatchValue = if ($env:GEMINI_SKIP_FIRST_PATCH) { $env:GEMINI_SKIP_FIRST_PATCH } else { "0" }
+$SkipEnable = $SkipEnableValue -eq "1"
+$SkipFirstPatch = $SkipFirstPatchValue -eq "1"
 $ProfilePath = if ($env:GEMINI_PROFILE_PATH) { $env:GEMINI_PROFILE_PATH } else { $PROFILE }
 
 function Download-OrCopy {

@@ -83,12 +83,6 @@ function Invoke-Case {
 
   try {
     $caseOutput = & { & $Action } 2>&1 | Out-String
-    if (-not $?) {
-      $caseExitCode = 1
-    }
-    elseif ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) {
-      $caseExitCode = $LASTEXITCODE
-    }
   }
   catch {
     $caseExitCode = 1
@@ -183,7 +177,10 @@ try {
     "TMPDIR" = Join-Path $statusCaseRoot "temp"
   }
   Invoke-Case "status-shows-tool-version" {
-    $scriptOutput = & "$RepoRoot\patch.ps1" status | Out-String
+    $statusOutputPath = Join-Path $statusCaseRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed" }
+    $scriptOutput = Get-Content -Path $statusOutputPath -Raw
     Assert-Contains $scriptOutput "Tool version:"
   } -CaseEnv $statusEnv
 
@@ -196,13 +193,17 @@ try {
     "TMPDIR" = Join-Path $installCaseRoot "temp"
   }
   Invoke-Case "install-prints-version" {
-    $env:GEMINI_INSTALL_DIR = "$RunRoot\install"
-    $env:GEMINI_PROFILE_PATH = "$RunRoot\profile.ps1"
+    $installRoot = Join-Path $installCaseRoot "install"
+    $env:GEMINI_INSTALL_DIR = $installRoot
+    $env:GEMINI_PROFILE_PATH = Join-Path $installCaseRoot "profile.ps1"
     $env:GEMINI_SKIP_ENABLE = "1"
     $env:GEMINI_SKIP_FIRST_PATCH = "1"
-    $output = & "$RepoRoot\install.ps1" | Out-String
+    $installOutputPath = Join-Path $installCaseRoot "install.txt"
+    & "$RepoRoot\install.ps1" *> $installOutputPath
+    if (-not $?) { throw "install.ps1 failed" }
+    $output = Get-Content -Path $installOutputPath -Raw
     Assert-Contains $output "Tool version: v"
-    Assert-PathExists "$RunRoot\install\VERSION"
+    Assert-PathExists (Join-Path $installRoot "VERSION")
   } -CaseEnv $installEnv
 
   $triCaseRoot = Join-Path $RunRoot "tri-state-healthy"
@@ -222,6 +223,7 @@ try {
   Invoke-Case "tri-state-healthy" {
     New-Item -ItemType Directory -Force -Path $triRuntimeRoot | Out-Null
     & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in tri-state-healthy" }
     Assert-FileContains (Join-Path $triRuntimeRoot "last-result") "status=healthy"
   } -CaseEnv $triEnv
 
@@ -240,8 +242,11 @@ try {
   }
   Invoke-Case "tri-state-drifted-glic" {
     New-Item -ItemType Directory -Force -Path $driftedGlicRuntimeRoot | Out-Null
-    & "$RepoRoot\patch.ps1" run | Out-Null
-    Assert-FileContains (Join-Path $driftedGlicRuntimeRoot "last-result") "status=drifted"
+    $statusOutputPath = Join-Path $driftedGlicCaseRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed in tri-state-drifted-glic" }
+    $scriptOutput = Get-Content -Path $statusOutputPath -Raw
+    Assert-Contains $scriptOutput "Current state: drifted"
   } -CaseEnv $driftedGlicEnv
 
   $unknownCaseRoot = Join-Path $RunRoot "tri-state-unknown-missing-fields"
@@ -260,6 +265,7 @@ try {
   Invoke-Case "tri-state-unknown-missing-fields" {
     New-Item -ItemType Directory -Force -Path $unknownRuntimeRoot | Out-Null
     & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in tri-state-unknown-missing-fields" }
     Assert-FileContains (Join-Path $unknownRuntimeRoot "last-result") "status=detect_error"
     Assert-FileContains (Join-Path $unknownRuntimeRoot "last-result") "reason=missing_required_fields"
   } -CaseEnv $unknownEnv
@@ -280,6 +286,7 @@ try {
   Invoke-Case "chrome-running-creates-pending" {
     New-Item -ItemType Directory -Force -Path $blockedRuntimeRoot | Out-Null
     & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in chrome-running-creates-pending" }
     Assert-FileContains (Join-Path $blockedRuntimeRoot "pending") "reason=blocked"
     Assert-FileContains (Join-Path $blockedRuntimeRoot "last-result") "status=blocked"
   } -CaseEnv $blockedEnv
@@ -304,8 +311,10 @@ try {
     New-Item -ItemType Directory -Force -Path $retryRuntimeRoot | Out-Null
     Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") $retryLocalStatePath -Force
     & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in retry-settles-after-close" }
     $env:GEMINI_CHROME_RUNNING = "0"
     & "$RepoRoot\patch.ps1" retry | Out-Null
+    if (-not $?) { throw "patch.ps1 retry failed in retry-settles-after-close" }
     Assert-FileMissing (Join-Path $retryRuntimeRoot "pending")
     Assert-FileContains (Join-Path $retryRuntimeRoot "last-result") "status=healthy"
   } -CaseEnv $retryEnv
@@ -328,6 +337,7 @@ try {
   Invoke-Case "patch-failure-recorded" {
     New-Item -ItemType Directory -Force -Path $patchFailureRuntimeRoot | Out-Null
     & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in patch-failure-recorded" }
     Assert-FileContains (Join-Path $patchFailureRuntimeRoot "last-result") "status=patch_failed"
   } -CaseEnv $patchFailureEnv
 
@@ -351,6 +361,7 @@ try {
     New-Item -ItemType Directory -Force -Path $verifyFailureRuntimeRoot | Out-Null
     Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") $verifyFailureLocalStatePath -Force
     & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in verify-failure-recorded" }
     Assert-FileContains (Join-Path $verifyFailureRuntimeRoot "last-result") "status=verify_failed"
   } -CaseEnv $verifyFailureEnv
 

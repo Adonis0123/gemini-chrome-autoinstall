@@ -72,8 +72,9 @@ if (-not $SkipFirstPatch) {
 }
 
 # Register shortcut functions in PowerShell profile
-$fixFunc = 'function gemini-chrome-fix { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" manual }'
-$statusFunc = 'function gemini-chrome-status { & "$env:USERPROFILE\.gemini-chrome-autoinstall\patch.ps1" status }'
+$patchScriptPath = Join-Path $InstallDir "patch.ps1"
+$fixFunc = "function gemini-chrome-fix { & `"$patchScriptPath`" manual }"
+$statusFunc = "function gemini-chrome-status { & `"$patchScriptPath`" status }"
 
 if (!(Test-Path $ProfilePath)) {
     New-Item -ItemType File -Path $ProfilePath -Force | Out-Null

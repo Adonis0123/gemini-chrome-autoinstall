@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- *(mac)* Add RAW_BASE variable for self-update([6e17ba7](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/6e17ba706c20807eabc4b27ec3f4f48c63c14636))
+- *(mac)* Add check_self_update function and call from cmd_run([6982b99](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/6982b992b84ad205129b01cfe66dea52a541152e))
+- *(win)* Add RawBase variable for self-update([5f6a680](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/5f6a6806bcfa055b539e2066167d0b94ebb1ebd5))
+- *(win)* Add Update-Self function and call from Invoke-Run and Invoke-Scheduled([9a9b4f7](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/9a9b4f7983a017088240dbc7da8d66874dee2fd2))
+
+### Bug Fixes
+
+- Update same fixtures to match current VERSION after rebase([7396160](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/73961604253d75d6f1a32cc231735a5a5ad4cb71))
+## [0.4.2] - 2026-03-29
+
 ### Refactoring
 
 - Replace periodic reconcile with Chrome close detection([18c6fc5](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/18c6fc53d4df2973b6fa7c06eee1ad5822613cb9))

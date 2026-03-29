@@ -64,11 +64,19 @@ if (-not $SkipEnable) {
     & (Join-Path $InstallDir "patch.ps1") enable
 }
 
+$firstPatchOk = $true
 if (-not $SkipFirstPatch) {
     Write-Host ""
     Write-Host "Running first-time patch..."
     Write-Host ""
     & (Join-Path $InstallDir "patch.ps1") manual
+    $lastResultPath = Join-Path $InstallDir "last-result"
+    if (Test-Path $lastResultPath) {
+        $resultStatus = (Select-String -Path $lastResultPath -Pattern '^status=(.+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+        if ($resultStatus -and $resultStatus -ne "healthy") {
+            $firstPatchOk = $false
+        }
+    }
 }
 
 # Register shortcut functions in PowerShell profile
@@ -102,8 +110,14 @@ if ($changed) {
 }
 
 Write-Host ""
-Write-Host "Installation complete!"
-Write-Host "Auto-monitoring is enabled: registry watcher detects Chrome updates in real time."
+if ($firstPatchOk) {
+    Write-Host "Installation complete!"
+    Write-Host "Auto-monitoring is enabled: registry watcher detects Chrome updates in real time."
+} else {
+    Write-Host "Installation complete, but the initial patch did not succeed."
+    Write-Host "Auto-monitoring is enabled and will retry automatically."
+    Write-Host "You can also run 'gemini-chrome-fix' manually after closing Chrome."
+}
 Write-Host "Tool version: $((Get-Content (Join-Path $InstallDir 'VERSION') -Raw).Trim())"
 Write-Host ""
 Write-Host "Useful commands:"

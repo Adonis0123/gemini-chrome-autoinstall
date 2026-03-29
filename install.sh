@@ -53,16 +53,30 @@ if [ "$SKIP_ENABLE" != "1" ]; then
     "$INSTALL_DIR/patch.sh" enable
 fi
 
+first_patch_ok=true
 if [ "$SKIP_FIRST_PATCH" != "1" ]; then
     echo ""
     echo "Running first-time patch..."
     echo ""
-    "$INSTALL_DIR/patch.sh" manual
+    "$INSTALL_DIR/patch.sh" manual || true
+    last_result_file="$INSTALL_DIR/last-result"
+    if [ -f "$last_result_file" ]; then
+        result_status=$(grep -m1 '^status=' "$last_result_file" | cut -d= -f2)
+        if [ -n "$result_status" ] && [ "$result_status" != "healthy" ]; then
+            first_patch_ok=false
+        fi
+    fi
 fi
 
 echo ""
-echo "Installation complete!"
-echo "The extension will be re-installed automatically after every Chrome update."
+if [ "$first_patch_ok" = true ]; then
+    echo "Installation complete!"
+    echo "The extension will be re-installed automatically after every Chrome update."
+else
+    echo "Installation complete, but the initial patch did not succeed."
+    echo "Auto-monitoring is enabled and will retry automatically."
+    echo "You can also run 'gemini-chrome-fix' manually after closing Chrome."
+fi
 tool_version="unknown"
 if [ -s "$INSTALL_DIR/VERSION" ]; then
     tool_version=$(tr -d '\n' < "$INSTALL_DIR/VERSION")

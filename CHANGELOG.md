@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- Make shortcut commands available immediately after install([0e252b9](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/0e252b9c17c5e3d195f8886a5049f1d51441d913))
+## [0.3.0] - 2026-03-29
+
+### Features
+
 - Show descriptive process name in macOS Activity Monitor([98667fb](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/98667fb16e2a1a7486c6a0d99f5d7ca13fb12e8c))
 ## [0.2.4] - 2026-03-29
 

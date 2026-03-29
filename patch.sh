@@ -24,6 +24,9 @@ CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/mai
 PROCESS_NAME="gemini-chrome-autopatch"
 LAUNCH_EXECUTABLE="${SCRIPT_DIR}/${PROCESS_NAME}"
 NEEDS_PATCH_CHROME_VERSION=""
+REPO="Adonis0123/gemini-chrome-autoinstall"
+BRANCH="master"
+RAW_BASE="${GEMINI_RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
 
 log() {
     mkdir -p "$(dirname "$LOG_FILE")"

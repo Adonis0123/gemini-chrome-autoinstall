@@ -30,6 +30,7 @@ function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$timestamp] $Message"
+    Write-Host $line
     $logDir = Split-Path $LogFile -Parent
     if ($logDir -and -not (Test-Path $logDir)) {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -522,6 +523,9 @@ function Invoke-Reconcile {
         "unknown" {
             if ($Trigger -eq "manual") {
                 return (Invoke-PatchAndVerify -PatchReason $patchState.reason)
+            }
+            if ($Trigger -eq "retry" -and (Test-Pending)) {
+                return (Invoke-PatchAndVerify -PatchReason (Get-PendingPatchReason))
             }
             Write-LastResult -Status "detect_error" -Reason $patchState.reason -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
             return $false

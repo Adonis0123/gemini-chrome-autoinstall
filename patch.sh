@@ -235,11 +235,12 @@ run_core_install() {
             return 1
         fi
 
-        if "$CORE_INSTALL_CMD"; then
+        "$CORE_INSTALL_CMD"
+        local rc=$?
+        if [ "$rc" -eq 0 ]; then
             log "Install completed successfully."
             return 0
         fi
-        local rc=$?
         log "Install failed with exit code $rc."
         return 1
     fi
@@ -275,6 +276,11 @@ get_chrome_version() {
 detect_patch_state() {
     if [ ! -f "$LOCAL_STATE_FILE" ]; then
         echo "unknown|local_state_missing"
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "unknown|python3_not_found"
         return 0
     fi
 
@@ -343,7 +349,6 @@ PY
 resolve_state_mapping() {
     local detect_state="$1"
     local has_pending="$2"
-    local chrome_running="$3"
 
     local result_status
     case "$detect_state" in
@@ -424,7 +429,7 @@ perform_patch_and_verify() {
         write_last_result "patch_failed" "$patch_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
         disarm_active_lock_cleanup
         release_active_lock
-        return 0
+        return 1
     fi
 
     local verify_result
@@ -437,7 +442,7 @@ perform_patch_and_verify() {
         write_last_result "verify_failed" "$verify_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
         disarm_active_lock_cleanup
         release_active_lock
-        return 0
+        return 1
     fi
 
     local installed_chrome_ver
@@ -472,6 +477,10 @@ reconcile_patch_state() {
             return 0
             ;;
         unknown)
+            if [ "$trigger" = "manual" ]; then
+                perform_patch_and_verify "$patch_reason"
+                return $?
+            fi
             if [ "$trigger" = "retry" ] && [ -f "$PENDING_FILE" ]; then
                 local pending_patch_reason
                 pending_patch_reason=$(get_pending_patch_reason)
@@ -655,7 +664,7 @@ cmd_status() {
     fi
 
     local state_mapping
-    state_mapping=$(resolve_state_mapping "$detect_state" "$has_pending" "$chrome_running")
+    state_mapping=$(resolve_state_mapping "$detect_state" "$has_pending")
     local current_state="${state_mapping#*|}"
 
     local pending_reason
@@ -750,6 +759,7 @@ cmd_retry() {
 
 cmd_manual() {
     log "Manual install triggered."
+    local reopen_chrome=false
 
     if is_chrome_running; then
         printf "Chrome is running. Close it to continue? (Y/N): "
@@ -757,6 +767,7 @@ cmd_manual() {
         if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
             log "Closing Chrome (user confirmed)..."
             killall "Google Chrome" 2>/dev/null
+            reopen_chrome=true
             local waited=0
             while is_chrome_running; do
                 if [ "$waited" -ge 30 ]; then
@@ -772,31 +783,15 @@ cmd_manual() {
         fi
     fi
 
-    if ! acquire_active_lock; then
-        write_last_result "unknown" "active_lock_busy" "$(get_chrome_version)" "another run in progress"
-        return 0
-    fi
-    arm_active_lock_cleanup
+    reconcile_patch_state "manual"
+    local rc=$?
 
-    local status=0
-    if run_core_install; then
-        save_patched_version "$(get_chrome_version)"
-        remove_pending
-        write_last_result "healthy" "manual_patched" "$(get_chrome_version)" "patched successfully"
-    else
-        status=1
-        write_last_result "unknown" "manual_install_failed" "$(get_chrome_version)" "check core installer output"
-    fi
-
-    disarm_active_lock_cleanup
-    release_active_lock
-
-    if [ "$status" -eq 0 ]; then
+    if [ "$rc" -eq 0 ] && [ "$reopen_chrome" = true ]; then
         log "Reopening Chrome..."
         open -a "Google Chrome"
     fi
 
-    return $status
+    return $rc
 }
 
 # Main

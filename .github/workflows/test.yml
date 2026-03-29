@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - master
-      - codex-state-driven-autopatch
-      - codex-state-driven-autopatch-ready
 
 permissions:
   contents: read

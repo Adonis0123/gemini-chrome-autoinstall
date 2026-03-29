@@ -21,6 +21,8 @@ LOCAL_STATE_FILE="${GEMINI_LOCAL_STATE_PATH:-$HOME/Library/Application Support/G
 TOOL_VERSION_FILE="${SCRIPT_DIR}/VERSION"
 CORE_INSTALL_CMD="${GEMINI_CORE_INSTALL_CMD:-}"
 CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh"
+PROCESS_NAME="gemini-chrome-autopatch"
+LAUNCH_EXECUTABLE="${SCRIPT_DIR}/${PROCESS_NAME}"
 NEEDS_PATCH_CHROME_VERSION=""
 REPO="Adonis0123/gemini-chrome-autoinstall"
 BRANCH="master"
@@ -527,7 +529,7 @@ cmd_enable() {
 	<string>${BOOT_LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${SCRIPT_DIR}/patch.sh</string>
+		<string>${LAUNCH_EXECUTABLE}</string>
 		<string>run</string>
 	</array>
 	<key>RunAtLoad</key>
@@ -547,7 +549,7 @@ EOF
 	<string>${WATCHER_LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${SCRIPT_DIR}/patch.sh</string>
+		<string>${LAUNCH_EXECUTABLE}</string>
 		<string>run</string>
 	</array>
 	<key>WatchPaths</key>
@@ -569,7 +571,7 @@ EOF
 	<string>${RETRY_LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${SCRIPT_DIR}/patch.sh</string>
+		<string>${LAUNCH_EXECUTABLE}</string>
 		<string>retry</string>
 	</array>
 	<key>KeepAlive</key>
@@ -597,7 +599,7 @@ EOF
 	<string>${FALLBACK_LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${SCRIPT_DIR}/patch.sh</string>
+		<string>${LAUNCH_EXECUTABLE}</string>
 		<string>run</string>
 	</array>
 	<key>StartInterval</key>
@@ -842,10 +844,14 @@ cmd_manual() {
         fi
     fi
 
+    # Wait for filesystem to flush after Chrome exit
+    sleep 2
+
     reconcile_patch_state "manual"
     local rc=$?
 
     if [ "$rc" -eq 0 ] && [ "$reopen_chrome" = true ]; then
+        sleep 2
         log "Reopening Chrome..."
         open -a "Google Chrome"
     fi

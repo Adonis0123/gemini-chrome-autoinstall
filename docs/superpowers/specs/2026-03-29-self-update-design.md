@@ -22,8 +22,10 @@ Add silent self-update capability to `patch.sh` (macOS) and `patch.ps1` (Windows
 ### Trigger
 
 `check_self_update()` / `Update-Self` is called at the top of:
-- macOS: `patch.sh run` (invoked by boot agent, watcher agent, retry agent)
-- Windows: `patch.ps1 scheduled` (invoked by Registry Run key at login)
+- macOS: `patch.sh run` (invoked by boot agent, watcher agent)
+- Windows: `patch.ps1 scheduled` (invoked by Registry Run key at login) and `patch.ps1 run`
+
+Note: macOS retry agent calls `patch.sh retry`, not `run` — self-update is not triggered during retry cycles (the 24h cooldown would skip it anyway).
 
 ### Flow
 
@@ -44,7 +46,7 @@ run / scheduled entry
   │   └─ Windows: patch.ps1, launcher.vbs, VERSION
   │   └─ Download failure → log warning, skip, local files unchanged
   │
-  ├─ mv / Move-Item from temp to $INSTALL_DIR (atomic replace)
+  ├─ mv / Move-Item from temp to $INSTALL_DIR (safe replace via temp + move)
   ├─ Update last-update-check timestamp
   ├─ Log "Self-updated from {old} to {new}"
   │
@@ -71,9 +73,27 @@ This prevents excessive checks in the retry scenario (60s polling loop).
 
 Simple string comparison: `remote_ver != local_ver` triggers update. No semantic version parsing needed — any difference means update. This handles both upgrades and (rare) downgrades.
 
+**Path consistency note:** In `patch.sh`, `TOOL_VERSION_FILE` points to `$SCRIPT_DIR/VERSION`, and in `patch.ps1`, `$ToolVersionFile` points to `$PSScriptRoot\VERSION`. Since `SCRIPT_DIR` / `$PSScriptRoot` equals `INSTALL_DIR` / `$InstallDir` in normal installations (the script runs from the install directory), reads and writes are consistent. The self-update function writes to `$INSTALL_DIR` which is the same directory. No change to `get_tool_version()` / `Get-ToolVersion` is needed.
+
 ### Data Source
 
 Fetch `$RAW_BASE/VERSION` where `RAW_BASE` defaults to `https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master`. Users can override via `$GEMINI_RAW_BASE` environment variable.
+
+**Important:** `RAW_BASE` / `$RawBase` currently only exists in `install.sh` / `install.ps1`. The same variable definition must be added to `patch.sh` and `patch.ps1`:
+
+```bash
+# patch.sh — add to variable declarations section
+REPO="Adonis0123/gemini-chrome-autoinstall"
+BRANCH="master"
+RAW_BASE="${GEMINI_RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
+```
+
+```powershell
+# patch.ps1 — add to variable declarations section
+$Repo = "Adonis0123/gemini-chrome-autoinstall"
+$Branch = "master"
+$RawBase = if ($env:GEMINI_RAW_BASE) { $env:GEMINI_RAW_BASE } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
+```
 
 ### Error Handling
 
@@ -142,9 +162,10 @@ function Update-Self {
     $checkFile = Join-Path $InstallDir "last-update-check"
     $now = [int](Get-Date -UFormat %s)
 
-    # 24h cooldown
+    # 24h cooldown (with parse protection for corrupted timestamp files)
     if (Test-Path $checkFile) {
-        $last = [int](Get-Content $checkFile -Raw).Trim()
+        $last = 0
+        [int]::TryParse((Get-Content $checkFile -Raw).Trim(), [ref]$last) | Out-Null
         if (($now - $last) -lt 86400) { return }
     }
 
@@ -182,7 +203,11 @@ function Update-Self {
 }
 ```
 
-Called at the start of the `scheduled` subcommand handler.
+Called at the start of both the `scheduled` and `run` subcommand handlers.
+
+### Execution Safety Note
+
+Both Bash and PowerShell parse/load the entire script into memory before execution. Overwriting the script file on disk during `check_self_update()` / `Update-Self` does not affect the currently running process. The new code takes effect on the next invocation.
 
 ## Test Plan
 
@@ -261,8 +286,8 @@ Windows test runner follows the same pattern with `Start-Process python` and Pow
 
 | File | Change |
 |------|--------|
-| `patch.sh` | Add `check_self_update()` function, call from `cmd_run()` |
-| `patch.ps1` | Add `Update-Self` function, call from `scheduled` handler |
+| `patch.sh` | Add `RAW_BASE` variable, add `check_self_update()` function, call from `cmd_run()` |
+| `patch.ps1` | Add `$RawBase` variable, add `Update-Self` function, call from `scheduled` and `run` handlers |
 | `tests/self-update/` | New test directory with runners and fixtures |
 
 ## Key Paths (Updated)

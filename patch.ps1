@@ -19,8 +19,8 @@ $PatchedVersionFile = Join-Path $InstallDir "patched-version.txt"
 $LastResultFile = Join-Path $InstallDir "last-result"
 $ToolVersionFile = Join-Path $PSScriptRoot "VERSION"
 $CoreInstallCommand = $env:GEMINI_CORE_INSTALL_CMD
-$ChromeUpdateClientPath = "HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
-$ChromeUpdateRegistrySubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
+$ChromeUpdateSubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
+$ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateVersionName = "pv"
 $RetryInterval = 60  # seconds
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
@@ -268,12 +268,21 @@ function Get-ChromeVersion {
         return $env:GEMINI_CHROME_VERSION
     }
 
-    try {
-        return (Get-ItemProperty -Path $ChromeUpdateClientPath -Name $ChromeUpdateVersionName -ErrorAction Stop).$ChromeUpdateVersionName
+    $registryPaths = @(
+        "HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}",
+        "HKLM:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}",
+        "HKLM:\Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
+    )
+
+    foreach ($regPath in $registryPaths) {
+        try {
+            $ver = (Get-ItemProperty -Path $regPath -Name $ChromeUpdateVersionName -ErrorAction Stop).$ChromeUpdateVersionName
+            if ($ver) { return $ver }
+        }
+        catch {}
     }
-    catch {
-        return (Get-LocalStateVersion)
-    }
+
+    return (Get-LocalStateVersion)
 }
 
 function Get-ChromeVersionOrUnknown {
@@ -755,6 +764,7 @@ using System.Runtime.InteropServices;
 
 public class RegistryWatcher {
     public const int HKEY_CURRENT_USER = unchecked((int)0x80000001);
+    public const int HKEY_LOCAL_MACHINE = unchecked((int)0x80000002);
     public const int KEY_NOTIFY = 0x0010;
     public const int REG_NOTIFY_CHANGE_LAST_SET = 0x00000004;
     public const int WAIT_OBJECT_0 = 0x00000000;
@@ -793,10 +803,36 @@ public class RegistryWatcher {
         return
     }
 
+    # Detect which registry hive and subkey has Chrome version
+    $watchHive = $null
+    $watchSubKey = $null
+    $probePaths = @(
+        @{ Hive = [RegistryWatcher]::HKEY_CURRENT_USER; SubKey = $ChromeUpdateSubKey; Label = "HKCU\$ChromeUpdateSubKey" },
+        @{ Hive = [RegistryWatcher]::HKEY_LOCAL_MACHINE; SubKey = $ChromeUpdateSubKey; Label = "HKLM\$ChromeUpdateSubKey" },
+        @{ Hive = [RegistryWatcher]::HKEY_LOCAL_MACHINE; SubKey = $ChromeUpdateWow64SubKey; Label = "HKLM\$ChromeUpdateWow64SubKey" }
+    )
+    foreach ($probe in $probePaths) {
+        $probeKey = [IntPtr]::Zero
+        $probeResult = [RegistryWatcher]::RegOpenKeyEx($probe.Hive, $probe.SubKey, 0, [RegistryWatcher]::KEY_NOTIFY, [ref]$probeKey)
+        if ($probeResult -eq 0) {
+            [RegistryWatcher]::RegCloseKey($probeKey) | Out-Null
+            $watchHive = $probe.Hive
+            $watchSubKey = $probe.SubKey
+            Write-Log "Watch: monitoring $($probe.Label)"
+            break
+        }
+    }
+
+    if ($null -eq $watchHive) {
+        Write-Log "Watch: no Chrome registry key found. Exiting."
+        [RegistryWatcher]::CloseHandle($hEvent) | Out-Null
+        return
+    }
+
     $hKey = [IntPtr]::Zero
     $result = [RegistryWatcher]::RegOpenKeyEx(
-        [RegistryWatcher]::HKEY_CURRENT_USER,
-        $ChromeUpdateRegistrySubKey,
+        $watchHive,
+        $watchSubKey,
         0,
         [RegistryWatcher]::KEY_NOTIFY,
         [ref]$hKey
@@ -850,8 +886,8 @@ public class RegistryWatcher {
             [RegistryWatcher]::RegCloseKey($hKey) | Out-Null
             $hKey = [IntPtr]::Zero
             $result = [RegistryWatcher]::RegOpenKeyEx(
-                [RegistryWatcher]::HKEY_CURRENT_USER,
-                $ChromeUpdateRegistrySubKey,
+                $watchHive,
+                $watchSubKey,
                 0,
                 [RegistryWatcher]::KEY_NOTIFY,
                 [ref]$hKey

@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Use staged Chrome shutdown in manual command([bd2cef6](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/bd2cef6429fb2fafc631d8952c2809e12663fa5a))
+## [0.2.2] - 2026-03-29
+
+### Bug Fixes
+
 - Detect Chrome version from HKLM and WOW6432Node registry paths([3903cc4](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/3903cc436d8fa30ec04f1cfac36714ff2e6f7b2c))
 ## [0.2.1] - 2026-03-29
 

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- Pass tag to git-cliff so release notes show version instead of Unreleased([0ff9248](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/0ff924851e58bb6f5cc105351ce4c4d4fb2f2028))
+## [0.2.0] - 2026-03-29
+
 ### Features
 
 - Add shared version and runtime metadata plumbing([b7888d8](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/b7888d833932618ff673494c0332103dbecc4926))

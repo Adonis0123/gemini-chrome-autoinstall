@@ -8,21 +8,41 @@ $TestLogFile = Join-Path $TestInstallDir "test.log"
 $Port = 18923
 $Pass = 0
 $Fail = 0
-$ServerProcess = $null
+$script:ServerProc = $null
 
 # --- Helpers ---
 
 function Start-FixtureServer {
     param([string]$FixtureDir)
-    $script:ServerProcess = Start-Process python -ArgumentList "-m", "http.server", $Port `
-        -WorkingDirectory $FixtureDir -WindowStyle Hidden -PassThru
+    $serverScript = @"
+`$listener = New-Object System.Net.HttpListener
+`$listener.Prefixes.Add('http://localhost:$Port/')
+`$listener.Start()
+while (`$listener.IsListening) {
+    try {
+        `$ctx = `$listener.GetContext()
+        `$file = Join-Path '$($FixtureDir -replace "'","''")' (`$ctx.Request.Url.LocalPath.TrimStart('/'))
+        if (Test-Path `$file) {
+            `$bytes = [System.IO.File]::ReadAllBytes(`$file)
+            `$ctx.Response.StatusCode = 200
+            `$ctx.Response.ContentType = 'text/plain'
+            `$ctx.Response.OutputStream.Write(`$bytes, 0, `$bytes.Length)
+        } else {
+            `$ctx.Response.StatusCode = 404
+        }
+        `$ctx.Response.Close()
+    } catch { break }
+}
+"@
+    $script:ServerProc = Start-Process powershell -ArgumentList "-NoProfile", "-Command", $serverScript `
+        -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 500
 }
 
 function Stop-FixtureServer {
-    if ($script:ServerProcess -and -not $script:ServerProcess.HasExited) {
-        Stop-Process -Id $script:ServerProcess.Id -Force -ErrorAction SilentlyContinue
-        $script:ServerProcess = $null
+    if ($script:ServerProc -and -not $script:ServerProc.HasExited) {
+        Stop-Process -Id $script:ServerProc.Id -Force -ErrorAction SilentlyContinue
+        $script:ServerProc = $null
     }
 }
 

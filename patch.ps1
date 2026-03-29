@@ -23,6 +23,7 @@ $ChromeUpdateSubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A
 $ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateVersionName = "pv"
 $RetryInterval = 60  # seconds
+$ReconcileInterval = 5  # number of timeout cycles between periodic reconcile checks
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
 $script:NeedsPatchChromeVersion = $null
 
@@ -735,9 +736,13 @@ function Invoke-Manual {
         }
     }
 
+    # Wait for filesystem to flush after Chrome exit
+    Start-Sleep -Seconds 2
+
     $success = Invoke-Reconcile -Trigger "manual"
 
     if ($success -and $reopenChrome) {
+        Start-Sleep -Seconds 2
         Write-Log "Reopening Chrome..."
         Start-Process "chrome"
     }
@@ -844,6 +849,8 @@ public class RegistryWatcher {
         return
     }
 
+    $timeoutCount = 0
+
     try {
         while ($true) {
             # Register async notification
@@ -875,7 +882,13 @@ public class RegistryWatcher {
                     [void](Invoke-Reconcile -Trigger "watch")
                 }
             } elseif ($waitResult -eq [RegistryWatcher]::WAIT_TIMEOUT) {
-                # Timeout — check for pending install
+                $timeoutCount++
+                # Periodic reconcile to catch re-drift after Chrome reopens
+                # (equivalent to macOS fallback agent)
+                if (($timeoutCount % $ReconcileInterval) -eq 0) {
+                    [void](Invoke-Reconcile -Trigger "watch")
+                }
+                # Check for pending install on every timeout
                 Invoke-PendingInstall
             } else {
                 Write-Log "Watch: WaitForSingleObject failed ($waitResult). Exiting."

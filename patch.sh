@@ -797,10 +797,14 @@ cmd_manual() {
         fi
     fi
 
+    # Wait for filesystem to flush after Chrome exit
+    sleep 2
+
     reconcile_patch_state "manual"
     local rc=$?
 
     if [ "$rc" -eq 0 ] && [ "$reopen_chrome" = true ]; then
+        sleep 2
         log "Reopening Chrome..."
         open -a "Google Chrome"
     fi

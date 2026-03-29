@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- Show descriptive process name in macOS Activity Monitor([98667fb](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/98667fb16e2a1a7486c6a0d99f5d7ca13fb12e8c))
+## [0.2.4] - 2026-03-29
+
 ### Bug Fixes
 
 - Stop old watcher and start fresh one during install([41f4d5e](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/41f4d5e6963307fe17087ac73c437ed29025119e))

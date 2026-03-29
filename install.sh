@@ -48,6 +48,7 @@ mkdir -p "$INSTALL_DIR"
 download_or_copy "patch.sh" "$INSTALL_DIR/patch.sh"
 download_or_copy "VERSION" "$INSTALL_DIR/VERSION"
 chmod +x "$INSTALL_DIR/patch.sh"
+ln -sf patch.sh "$INSTALL_DIR/gemini-chrome-autopatch"
 
 if [ "$SKIP_ENABLE" != "1" ]; then
     "$INSTALL_DIR/patch.sh" enable

@@ -1,0 +1,9 @@
+{
+  "variations_country": "us",
+  "variations_permanent_consistency_country": ["seed", "us"],
+  "profile": {
+    "info_cache": {
+      "Default": {}
+    }
+  }
+}

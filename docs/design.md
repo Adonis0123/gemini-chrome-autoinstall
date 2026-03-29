@@ -1,432 +1,280 @@
-# Gemini Chrome AutoInstall — 设计方案
+# Gemini Chrome AutoInstall Design
 
-## 1. 项目概述
+## 1. Goal
 
-### 解决的问题
+`gemini-chrome-autoinstall` is a state-driven repair tool for Gemini-in-Chrome.
 
-Chrome 浏览器在自动更新后，会移除通过非官方渠道安装的扩展（如 Gemini-in-Chrome）。用户每次 Chrome 更新后都需要手动重新安装扩展，体验极差。
+The tool does not assume a Chrome version change automatically means patching is required. Instead it uses version changes and trigger events as signals, then checks `Local State` to decide whether the machine is actually:
 
-### 核心策略
+- `healthy`
+- `drifted`
+- `unknown`
+- `pending`
 
-```
-Chrome 更新 → 自动检测更新事件 → 等待 Chrome 关闭 → 重新安装扩展
-```
+The system only writes when Chrome is closed. If Chrome is still open, it records `pending` metadata and retries later.
 
-### 设计目标
+## 2. Architecture
 
-- **自动化**：无需用户手动干预，后台自动完成扩展恢复
-- **幂等性**：脚本可安全重复执行，不会产生副作用
-- **安全性**：完善的锁机制和超时保护，避免资源竞争和死锁
-- **跨平台**：支持 macOS 和 Windows，行为一致
+### Core flow
 
----
-
-## 2. 整体架构
-
-### 系统架构图
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      用户操作                            │
-│                                                         │
-│   curl ... | bash          PowerShell ... | iex          │
-│        ↓                          ↓                      │
-│   install.sh                 install.ps1                 │
-│   (macOS 安装器)             (Windows 安装器)             │
-│        │                          │                      │
-│        ├── 清理旧锁               ├── 清理旧锁            │
-│        ├── 下载 patch.sh          ├── 下载 patch.ps1      │
-│        └── 调用 enable            └── 调用 enable         │
-│              ↓                          ↓                │
-│        patch.sh enable          patch.ps1 enable         │
-│              │                          │                │
-│              ├── Boot Agent             ├── Scheduled    │
-│              │   (登录触发)              │   Task         │
-│              └── Watcher Agent          │   (登录+4h)    │
-│                  (文件监控触发)           │     ↓          │
-│                    ↓                    │  scheduled     │
-│                    │                    │     │          │
-│                    │                    │     ├── 启动   │
-│                    │                    │     │  watch   │
-│                    │                    │     │  进程    │
-│                    │                    │     └── 兜底   │
-│                    │                    │        轮询    │
-│              patch.sh run         patch.ps1 run          │
-│                    │                    │                │
-│                    ├── 冷却锁检查        ├── 冷却锁检查    │
-│                    ├── 互斥锁获取        ├── 互斥锁获取    │
-│                    ├── 等待 Chrome       ├── 等待 Chrome   │
-│                    └── 执行核心安装      └── 执行核心安装   │
-│                          ↓                    ↓          │
-│              appsail/Gemini-in-Chrome install 脚本        │
-└─────────────────────────────────────────────────────────┘
+```text
+trigger
+  -> read Chrome version signal
+  -> inspect Local State
+  -> detect current patch state
+  -> if healthy: record healthy version and clear stale pending
+  -> if drifted + Chrome open: record pending
+  -> if drifted + Chrome closed: run upstream patch + verify result
+  -> if unknown / patch_failed / verify_failed: record failure and surface manual recovery
 ```
 
-### 双平台架构对比
+### Responsibility split
 
-| 维度 | macOS | Windows |
-|------|-------|---------|
-| 安装器 | `install.sh` (bash) | `install.ps1` (PowerShell) |
-| 补丁脚本 | `patch.sh` (bash) | `patch.ps1` (PowerShell) |
-| 触发机制 | LaunchAgent × 2 | Registry Run key（开机自启） |
-| 启动触发 | `RunAtLoad=true` | `HKCU\...\Run`（登录时启动） |
-| 更新检测 | `WatchPaths`（文件监控） | 注册表监听（`RegNotifyChangeKeyValue`） |
-| 兜底机制 | 无需（WatchPaths 可靠） | 无需（注册表监听实时触发） |
-| Chrome 检测 | `pgrep -x "Google Chrome"` | `Get-Process chrome` |
-| 关闭确认 | `osascript -e 'quit app'` | `Stop-Process -Name chrome -Force` |
-| 日志路径 | `~/Library/Logs/` | `%LOCALAPPDATA%/` |
+| Layer | Responsibility |
+|------|----------------|
+| `install.sh` / `install.ps1` | Download scripts, register startup hooks, expose current tool version |
+| `patch.sh` / `patch.ps1` | Detect state, reconcile drift, maintain pending metadata, expose status |
+| Trigger layer | LaunchAgents on macOS, Run key + watcher on Windows |
 
-### 文件结构
+## 3. Runtime Files
 
-```
-gemini-chrome-autoinstall/
-├── install.sh       # macOS 一键安装器：下载 patch.sh 并注册自动任务
-├── install.ps1      # Windows 一键安装器：下载 patch.ps1 并注册自动任务
-├── patch.sh         # macOS 核心控制脚本：6 个子命令
-├── patch.ps1        # Windows 核心控制脚本：8 个子命令
-├── README.md        # 用户文档
-└── LICENSE          # MIT 许可证
-```
+### macOS
 
-安装后本地文件结构：
+| Item | Path |
+|------|------|
+| Install directory | `~/.gemini-chrome-autoinstall/` |
+| Pending metadata | `~/.gemini-chrome-autoinstall/pending` |
+| Last healthy version | `~/.gemini-chrome-autoinstall/patched-version.txt` |
+| Last result metadata | `~/.gemini-chrome-autoinstall/last-result` |
+| Log | `~/Library/Logs/gemini-chrome-autoinstall.log` |
+| Active lock | `/tmp/gemini-chrome-autoinstall.active.lock/` |
 
-```
-# macOS
-~/.gemini-chrome-autoinstall/
-└── patch.sh                                              # 控制脚本
-~/Library/LaunchAgents/
-├── com.gemini-chrome-autoinstall.boot.plist               # 启动 Agent
-└── com.gemini-chrome-autoinstall.watcher.plist             # 监控 Agent
-~/Library/Logs/
-└── gemini-chrome-autoinstall.log                          # 日志文件
+### Windows
 
-# Windows
-%USERPROFILE%\.gemini-chrome-autoinstall\
-├── patch.ps1                                              # 控制脚本
-└── chrome-version.txt                                     # 记录的 Chrome 版本
-%LOCALAPPDATA%\
-└── gemini-chrome-autoinstall.log                          # 日志文件
-# HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GeminiChromeAutoPatch  # 开机自启（Registry Run key）
-# $PROFILE 中注册 gemini-chrome-fix / gemini-chrome-status 快捷函数
-```
+| Item | Path |
+|------|------|
+| Install directory | `%USERPROFILE%\.gemini-chrome-autoinstall\` |
+| Pending metadata | `%USERPROFILE%\.gemini-chrome-autoinstall\pending` |
+| Last healthy version | `%USERPROFILE%\.gemini-chrome-autoinstall\patched-version.txt` |
+| Last result metadata | `%USERPROFILE%\.gemini-chrome-autoinstall\last-result` |
+| Log | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
+| Active lock | `%TEMP%\gemini-chrome-autoinstall.active.lock\` |
 
-### 外部依赖
+### Metadata file format
 
-| 依赖 | 用途 | 来源 |
-|------|------|------|
-| Gemini-in-Chrome install.sh | macOS 核心扩展安装脚本 | `appsail/Gemini-in-Chrome` (main 分支) |
-| Gemini-in-Chrome install.ps1 | Windows 核心扩展安装脚本 | `appsail/Gemini-in-Chrome` (main 分支) |
+`pending`
 
----
-
-## 3. 安装模块 (install.sh / install.ps1)
-
-### 职责
-
-一键完成所有安装工作：下载补丁脚本 → 注册自动任务 → 注册快捷函数（Windows）→ 显示使用指南。
-
-### 幂等性设计
-
-安装器可安全重复执行，执行流程：
-
-```
-1. 清理旧锁（防止上次异常退出残留的锁）
-   ├── macOS:  rmdir /tmp/gemini-chrome-autoinstall.active.lock
-   └── Windows: Remove-Item $ActiveLock -ErrorAction SilentlyContinue
-
-2. 创建安装目录（-Force / -p 确保幂等）
-   ├── macOS:  mkdir -p ~/.gemini-chrome-autoinstall
-   └── Windows: New-Item -ItemType Directory -Force
-
-3. 下载 patch 脚本（覆盖旧文件）
-   ├── macOS:  curl -fsSL ... -o patch.sh && chmod +x
-   └── Windows: Invoke-WebRequest ... -OutFile patch.ps1
-
-4. 调用 patch enable（内部也是幂等的）
-   ├── macOS:  先 unload 再 load LaunchAgents
-   └── Windows: Register-ScheduledTask -Force（覆盖注册）
-
-5. 注册 Profile 快捷函数（仅 Windows）
-   └── Windows: 检查 $PROFILE 中是否已有 gemini-chrome-fix / gemini-chrome-status
-       ├── 不存在 → Add-Content 追加函数定义（带 `n 前缀确保换行）
-       └── 已存在 → 跳过，幂等安全
+```text
+pending
+reason=blocked
+patch_reason=variations_country=cn
+first_seen_at=2026-03-29T08:00:00Z
+last_attempt_at=2026-03-29T08:04:00Z
+retry_count=4
+detected_version=136.0.7103.49
+platform=macos
 ```
 
-### 安装流程图
+`last-result`
 
-```
-用户执行一键安装命令
-        ↓
-  清理残留锁文件
-        ↓
-  创建安装目录
-        ↓
-  下载 patch 脚本
-        ↓
-  调用 patch enable
-        ↓
-  输出安装成功信息
-  (含可用命令列表)
+```text
+status=healthy
+reason=ok
+timestamp=2026-03-29T08:05:00Z
+chrome_version=136.0.7103.49
+tool_version=v0.1.2
+hint=
 ```
 
----
+## 4. State Model
 
-## 4. 补丁模块 (patch.sh / patch.ps1)
+### Detector states
 
-### 子命令设计
+| State | Meaning |
+|------|---------|
+| `healthy` | Required `Local State` fields match expected patched values |
+| `drifted` | `Local State` proves the machine has fallen out of the expected patched state |
+| `unknown` | The tool cannot prove health because the file is missing, invalid, or missing required fields |
 
-| 命令 | 用途 | 触发方式 | 关键特性 |
-|------|------|----------|----------|
-| `enable` | 注册并启动后台自动任务 | 安装时 / 用户手动 | 幂等：先卸载再加载 |
-| `disable` | 停止后台自动任务 | 用户手动 | 移除 Agent/Task + 停止 watch 进程 |
-| `status` | 显示系统状态 | 用户手动 | 只读，显示 watch 进程和版本信息 |
-| `run` | 带锁和等待的完整补丁流程 | 自动触发 | 冷却锁 + 互斥锁 + Chrome 等待，返回成功/失败 |
-| `manual` | 快速手动补丁 | 用户手动 | 提示确认关闭 Chrome + 等待退出循环 |
-| `uninstall` | 完全卸载 | 用户手动 | 移除所有文件、任务和 watch 进程 |
-| `watch` | 注册表监听守护进程 | scheduled 子命令 | Windows 专用，阻塞式零 CPU 监听 |
-| `scheduled` | 启动入口 | Registry Run key | Windows 专用，确保 watch 进程运行 |
+### User-facing current states
 
-### 并发控制机制
+| Current state | Meaning |
+|------|---------|
+| `healthy` | Verified healthy and no pending retry remains |
+| `drifted` | Drift is confirmed and the machine is not currently blocked by pending metadata |
+| `pending` | Drift has been detected but automatic repair is waiting or retrying |
+| `unknown` | Detection could not prove the current state safely |
 
-系统使用**双锁机制**确保安全：
+### Failure/result states
 
-#### Active Lock（互斥锁）
+| Result | Meaning |
+|------|---------|
+| `detect_error` | Detection failed or required fields were missing |
+| `blocked` | Chrome is still open or another run is active |
+| `patch_failed` | Upstream patch command exited unsuccessfully |
+| `verify_failed` | Patch command returned success, but `Local State` still was not healthy afterwards |
 
-- **类型**：目录锁（利用 `mkdir` 的原子性）
-- **路径**：`/tmp/gemini-chrome-autoinstall.active.lock/`（macOS）或 `%TEMP%\gemini-chrome-autoinstall.active.lock\`（Windows）
-- **目的**：防止同一时刻多个 patch 实例并发执行
+## 5. Health Detection
 
-```
-获取锁：mkdir <lock_dir>
-  ├── 成功（返回 0）：获得锁，继续执行
-  └── 失败（目录已存在）：其他实例正在运行，放弃执行
+The detector currently checks these `Local State` signals:
 
-释放锁：rmdir <lock_dir>
-  └── 通过 trap EXIT / try-finally 确保释放
-```
+- `variations_country == "us"`
+- trailing country value in `variations_permanent_consistency_country == "us"`
+- at least one `profile.info_cache.*.is_glic_eligible` value exists
+- no `is_glic_eligible == false`
 
-#### Cooldown Lock（冷却锁）
+Detector rules:
 
-- **类型**：普通文件（利用文件修改时间戳）
-- **路径**：`/tmp/gemini-chrome-autoinstall.lock`（macOS）或 `%TEMP%\gemini-chrome-autoinstall.lock`（Windows）
-- **冷却时长**：300 秒（5 分钟）
-- **目的**：防止短时间内重复执行（如 Boot + Watcher 同时触发）
+- missing file or invalid JSON -> `unknown`
+- missing required fields -> `unknown`
+- `variations_country != "us"` -> `drifted`
+- trailing `variations_permanent_consistency_country != "us"` -> `drifted`
+- any `is_glic_eligible == false` -> `drifted`
+- otherwise -> `healthy`
 
-```
-检查冷却：
-  1. 读取锁文件修改时间
-  2. 计算：age = 当前时间 - 修改时间
-  3. 若 age < 300s：跳过执行（仍在冷却期内）
-  4. 若 age >= 300s 或文件不存在：允许执行
+## 6. macOS Trigger Model
 
-更新冷却：touch <lock_file>（在执行核心安装前更新时间戳）
-```
+macOS uses four LaunchAgents:
 
-#### 双锁协作流程
+| Label | Trigger | Action |
+|------|---------|--------|
+| `com.gemini-chrome-autoinstall.boot` | login | `patch.sh run` |
+| `com.gemini-chrome-autoinstall.watcher` | Chrome app metadata changes | `patch.sh run` |
+| `com.gemini-chrome-autoinstall.retry` | `pending` exists | `patch.sh retry` |
+| `com.gemini-chrome-autoinstall.fallback` | every 30 minutes | `patch.sh run` |
 
-```
-run 命令触发
-    ↓
-检查冷却锁 ──→ 5分钟内执行过？──→ 是 → 跳过，记录日志
-    ↓ 否
-获取互斥锁 ──→ 其他实例运行中？──→ 是 → 跳过，记录日志
-    ↓ 否
-设置 trap EXIT（确保锁释放）
-    ↓
-等待 Chrome 关闭
-    ↓
-更新冷却锁时间戳
-    ↓
-执行核心安装
-    ↓
-返回成功/失败（调用方据此决定是否更新版本文件）
-    ↓
-释放互斥锁（trap 自动触发）
-```
+The boot and watcher agents discover potential drift quickly. The retry and fallback agents help the system converge after blocked writes or missed file events.
 
-### 自动触发机制
+## 7. Windows Trigger Model
 
-#### macOS: 双 LaunchAgent 架构
+Windows uses a login startup entry plus a background registry watcher.
 
-**Boot Agent**（`com.gemini-chrome-autoinstall.boot.plist`）：
-- 触发条件：`RunAtLoad = true`（用户登录时）
-- 覆盖场景：Chrome 在关机/注销期间更新
-- 执行：`patch.sh run`
+### Startup
 
-**Watcher Agent**（`com.gemini-chrome-autoinstall.watcher.plist`）：
-- 触发条件：`WatchPaths = [/Applications/Google Chrome.app/Contents/Info.plist]`
-- 覆盖场景：Chrome 在用户会话期间更新
-- 执行：`patch.sh run`
+- Run key: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\GeminiChromeAutoPatch`
+- Startup command: `patch.ps1 scheduled`
 
-两个 Agent 互为补充，冷却锁防止重复执行。
+### Watch source
 
-#### Windows: Registry Run key + 注册表监听架构
+- Registry key: `HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}`
+- Version value: `pv`
 
-**开机自启**：
-- 通过 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` 注册
-- 登录时执行 `wscript.exe launcher.vbs scheduled`（无需管理员权限）
+### Background flow
 
-**scheduled 子命令**（启动入口）：
-1. 检查是否已有 `watch` 进程运行（通过进程命令行匹配）
-2. 没有 → 后台启动 `watch` 进程（`Start-Process -WindowStyle Hidden`）
+`scheduled` does two things:
 
-**watch 子命令**（注册表监听守护进程）：
-- 使用 Win32 API `RegNotifyChangeKeyValue` 监听 `HKCU:\Software\Google\Chrome\BLBeacon`
-- 监听 `REG_NOTIFY_CHANGE_LAST_SET`（值变化）
-- 阻塞式调用（`fAsynchronous=false`），不消耗 CPU
-- 每次通知后重新注册监听（Win32 API 要求）
-- 版本变化时调用 `Invoke-Run`，仅在补丁成功后才更新版本文件
-- 启动时仅在版本文件**不存在**时初始化，不覆盖已有记录
+1. run a reconcile pass immediately
+2. ensure `patch.ps1 watch` is running
 
-**版本记录**：
-- 文件路径：`%USERPROFILE%\.gemini-chrome-autoinstall\chrome-version.txt`
-- 记录最近一次**成功补丁**对应的 Chrome 版本
-- 补丁失败时保留旧版本，确保下次触发仍会重试
+`watch` waits on registry change notifications and also wakes up on timeout so pending retries can continue without a separate scheduler.
 
-### 关闭浏览器确认（manual 命令）
+## 8. Concurrency Control
 
-`manual` 命令在 Chrome 运行时不再直接报错退出，而是提示用户确认关闭，并等待进程完全退出后再继续安装：
+This system uses one concurrency primitive only:
 
-**macOS**：
-```bash
-printf "Chrome is running. Close it to continue? (Y/N): "
-read -r response
-# Y → osascript -e 'quit app "Google Chrome"'（优雅退出）
-#   → 复用 wait_for_chrome_to_close 循环确认退出（超时则中止）
-# N → 取消操作
+- active lock directory (`mkdir` / `New-Item -ItemType Directory`)
+
+Purpose:
+
+- prevent concurrent patch attempts
+- recover stale locks using stored PID checks
+
+There is no time-based suppression path anymore. Repeated triggers are handled by current-state checks plus the active lock.
+
+## 9. Reconcile Flow
+
+### Automatic path
+
+```text
+run/retry/watch/startup trigger
+  -> detect patch state
+  -> healthy: clear pending, save healthy version, record healthy result
+  -> unknown: record detect_error and surface manual command
+  -> drifted + Chrome open: update pending and record blocked
+  -> drifted + Chrome closed: patch + verify
 ```
 
-**Windows**：
-```powershell
-$response = Read-Host "Chrome is running. Close it to continue? (Y/N)"
-# Y → Stop-Process -Name "chrome" -Force
-#   → 复用 Wait-ForChromeToExit 循环确认退出（超时则中止）
-# N → 取消操作
+### Patch + verify
+
+```text
+acquire active lock
+  -> run upstream Gemini-in-Chrome installer
+  -> if installer fails: patch_failed
+  -> if installer succeeds: detect state again
+  -> if still not healthy: verify_failed
+  -> if healthy: save patched version, clear pending, record healthy
+release active lock
 ```
 
-### Chrome 等待机制
+## 10. Status Output
 
-```
-waited = 0
-WAIT_INTERVAL = 5s
-MAX_WAIT = 600s（10 分钟）
+Current status output is designed for supportability, not just “is the agent loaded.”
 
-while Chrome 正在运行:
-    if waited >= MAX_WAIT:
-        记录超时日志，放弃执行
-        return 1
-    记录等待日志："Chrome is running. Waiting... (${waited}s / ${MAX_WAIT}s)"
-    sleep 5
-    waited += 5
-```
+Common fields:
 
-Chrome 进程检测方式：
-- macOS：`pgrep -x "Google Chrome"`（精确匹配进程名）
-- Windows：`Get-Process chrome -ErrorAction SilentlyContinue`
+- Tool version
+- Chrome version
+- Last healthy version
+- Current state
+- Pending reason
+- Pending patch reason
+- Pending retry count
+- Pending age
+- Last attempt
 
-### 状态检测 (status 命令)
+Windows also keeps startup-entry and watcher-process visibility. macOS also shows fallback-agent availability.
 
-| 状态指标 | macOS | Windows |
-|----------|-------|---------|
-| 后台任务注册 | 检查 `launchctl list` | 检查 `Get-ScheduledTask` |
-| Plist/Task 文件 | 检查文件是否存在 | 检查任务是否注册 |
-| Watch 进程 | — | 检查进程命令行匹配 |
-| Chrome 运行状态 | — | `Get-Process chrome` |
-| 已保存版本 | — | 读取 `chrome-version.txt` |
-| 注册表版本 | — | 读取 `BLBeacon\version` |
-| 互斥锁状态 | 检查目录是否存在 | 检查目录是否存在 |
-| 冷却锁状态 | 显示距上次运行秒数 | 显示距上次运行秒数 |
-| 日志文件路径 | — | 显示 `$LogFile` 路径 |
+## 11. Manual Recovery
 
----
+`gemini-chrome-fix` remains the stable escape hatch.
 
-## 5. 安全机制
+Use it when:
 
-### 锁机制详解
+- `status` shows `detect_error`
+- `status` shows `patch_failed`
+- `status` shows `verify_failed`
+- you want to force a user-confirmed repair path immediately
 
-#### Active Lock + Cooldown Lock 配合
+## 12. Testing Strategy
 
-```
-场景：Chrome 更新后，Boot Agent 和 Watcher Agent 几乎同时触发
+The test suite is organized around fixed `Local State` fixtures and deterministic fake installers.
 
-时间线：
-  T+0s   Boot Agent 触发 → 检查冷却 → 无冷却 → 获取互斥锁 ✓ → 开始等待 Chrome
-  T+1s   Watcher Agent 触发 → 检查冷却 → 无冷却 → 获取互斥锁 ✗ → 跳过执行
-  T+30s  Chrome 关闭 → Boot Agent 更新冷却 → 执行核心安装 → 释放互斥锁
+### Fixture categories
 
-场景：核心安装完成后 Watcher 再次触发
+- `healthy`
+- `drifted-variations-country`
+- `drifted-permanent-country`
+- `drifted-glic-false`
+- `unknown-missing-fields`
+- `unknown-invalid`
 
-时间线：
-  T+31s  Watcher 再次触发 → 检查冷却 → 距上次仅 1s（< 300s）→ 跳过执行 ✓
-```
+### Test coverage goals
 
-### Chrome 等待超时保护
+- installer version visibility
+- healthy no-op
+- drift detection
+- pending creation while Chrome is running
+- retry settle after Chrome closes
+- `patch_failed`
+- `verify_failed`
+- richer `status` output
 
-- 最大等待 600 秒（10 分钟），防止无限阻塞
-- 超时后记录错误日志并安全退出
-- 互斥锁通过 trap/finally 在超时后也能正确释放
+### Verification commands
 
-### 清理机制
-
-#### macOS: trap EXIT
+macOS:
 
 ```bash
-cleanup() { rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || true; }
-trap cleanup EXIT
+bash tests/macos/run-tests.sh
+bash -n patch.sh
 ```
 
-- 无论正常退出、错误退出还是信号中断，都会执行清理
-- `rmdir` 只能删除空目录，不会误删文件
-
-#### Windows: try/finally
+Windows:
 
 ```powershell
-try {
-    # 执行逻辑
-} finally {
-    Remove-Item $ActiveLock -Force -ErrorAction SilentlyContinue
-}
+pwsh -NoLogo -NoProfile -File tests/windows/run-tests.ps1
+pwsh -NoLogo -NoProfile -Command "[void][scriptblock]::Create((Get-Content patch.ps1 -Raw))"
 ```
 
-- `finally` 块确保在异常情况下也释放锁
+### CI
 
-### 安装器的锁清理
-
-两个安装器都会在启动时主动清理残留的 Active Lock：
-
-```bash
-# install.sh
-rmdir /tmp/gemini-chrome-autoinstall.active.lock 2>/dev/null || true
-```
-
-```powershell
-# install.ps1
-Remove-Item $ActiveLock -ErrorAction SilentlyContinue
-```
-
-这确保了异常退出后重新安装不会被死锁阻塞。
-
----
-
-## 6. 平台差异对照表
-
-| 特性 | macOS | Windows |
-|------|-------|---------|
-| **脚本解释器** | bash | PowerShell 5+ |
-| **自动触发方式** | LaunchAgent (Boot + Watcher) | Registry Run key（登录时启动） |
-| **实时更新检测** | 支持（WatchPaths 监控 Info.plist） | 支持（RegNotifyChangeKeyValue 监听注册表） |
-| **兜底轮询** | 无需 | 无需（注册表监听实时触发） |
-| **版本记录** | 无需 | `chrome-version.txt` |
-| **关闭确认（manual）** | `osascript` 优雅退出 | `Stop-Process` 强制关闭 |
-| **安装目录** | `~/.gemini-chrome-autoinstall/` | `%USERPROFILE%\.gemini-chrome-autoinstall\` |
-| **日志路径** | `~/Library/Logs/gemini-chrome-autoinstall.log` | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
-| **冷却锁路径** | `/tmp/gemini-chrome-autoinstall.lock` | `%TEMP%\gemini-chrome-autoinstall.lock` |
-| **互斥锁路径** | `/tmp/gemini-chrome-autoinstall.active.lock/` | `%TEMP%\gemini-chrome-autoinstall.active.lock\` |
-| **Chrome 进程检测** | `pgrep -x "Google Chrome"` | `Get-Process chrome` |
-| **HTTP 下载** | `curl -fsSL` | `Invoke-WebRequest` / `Invoke-RestMethod` |
-| **幂等安装** | `launchctl unload` → `launchctl load` | `Register-ScheduledTask -Force` |
-| **错误静默** | `2>/dev/null \|\| true` | `-ErrorAction SilentlyContinue` |
-| **清理保障** | `trap EXIT` | `try/finally` |
-| **冷却时长** | 300s (5 min) | 300s (5 min) |
-| **最大等待** | 600s (10 min) | 600s (10 min) |
-| **轮询间隔** | 5s | 5s |
+GitHub Actions runs the macOS and Windows test suites in a matrix workflow so the Windows path is verified even when a local shell session does not have `pwsh`.

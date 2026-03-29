@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- Add post-patch delay and periodic watcher reconcile([59cf2d6](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/59cf2d660e76ab3a12035db79fd756e400f5c28f))
+## [0.4.0] - 2026-03-29
+
 ### Features
 
 - Make shortcut commands available immediately after install([0e252b9](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/0e252b9c17c5e3d195f8886a5049f1d51441d913))

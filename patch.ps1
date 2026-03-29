@@ -25,6 +25,9 @@ $ChromeUpdateVersionName = "pv"
 $RetryInterval = 60  # seconds
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
 $script:NeedsPatchChromeVersion = $null
+$Repo = "Adonis0123/gemini-chrome-autoinstall"
+$Branch = "master"
+$RawBase = if ($env:GEMINI_RAW_BASE) { $env:GEMINI_RAW_BASE } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
 
 function Write-Log {
     param([string]$Message)

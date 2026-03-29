@@ -725,7 +725,51 @@ cmd_uninstall() {
     echo "Done. gemini-chrome-autoinstall has been completely removed."
 }
 
+check_self_update() {
+    local check_file="$INSTALL_DIR/last-update-check"
+    local now=$(date +%s)
+
+    # 24h cooldown
+    if [ -f "$check_file" ]; then
+        local last=$(cat "$check_file")
+        if [ $((now - last)) -lt 86400 ]; then
+            return 0
+        fi
+    fi
+
+    # Fetch remote version
+    local remote_ver
+    remote_ver=$(curl -fsSL --max-time 5 "$RAW_BASE/VERSION" 2>/dev/null) || {
+        log "Self-update check failed: network error"
+        return 0
+    }
+    remote_ver=$(echo "$remote_ver" | tr -d '\n')
+    local local_ver=$(get_tool_version)
+
+    # Update timestamp before download — intentional: if download fails,
+    # we still wait 24h before retrying to avoid hammering the network.
+    # Natural retry happens on the next day's trigger cycle.
+    echo "$now" > "$check_file"
+
+    [ "$remote_ver" = "$local_ver" ] && return 0
+
+    # Download to temp, then move
+    local tmp=$(mktemp -d)
+    curl -fsSL --max-time 10 "$RAW_BASE/patch.sh" -o "$tmp/patch.sh" &&
+    curl -fsSL --max-time 5  "$RAW_BASE/VERSION" -o "$tmp/VERSION" || {
+        log "Self-update download failed"
+        rm -rf "$tmp"
+        return 0
+    }
+    chmod +x "$tmp/patch.sh"
+    mv "$tmp/patch.sh" "$INSTALL_DIR/patch.sh"
+    mv "$tmp/VERSION"  "$INSTALL_DIR/VERSION"
+    rm -rf "$tmp"
+    log "Self-updated from $local_ver to $remote_ver"
+}
+
 cmd_run() {
+    check_self_update
     log "Run triggered."
     reconcile_patch_state "run" || true
 

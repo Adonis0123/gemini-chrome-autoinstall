@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Refactoring
+
+- Replace periodic reconcile with Chrome close detection([18c6fc5](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/18c6fc53d4df2973b6fa7c06eee1ad5822613cb9))
+## [0.4.1] - 2026-03-29
+
 ### Bug Fixes
 
 - Add post-patch delay and periodic watcher reconcile([59cf2d6](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/59cf2d660e76ab3a12035db79fd756e400f5c28f))

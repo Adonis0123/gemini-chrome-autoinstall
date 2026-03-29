@@ -708,7 +708,53 @@ function Invoke-Uninstall {
     Write-Host "Done. gemini-chrome-autoinstall has been completely removed."
 }
 
+function Update-Self {
+    $checkFile = Join-Path $InstallDir "last-update-check"
+    $now = [int](Get-Date -UFormat %s)
+
+    # 24h cooldown (with parse protection for corrupted timestamp files)
+    if (Test-Path $checkFile) {
+        $last = 0
+        [int]::TryParse((Get-Content $checkFile -Raw).Trim(), [ref]$last) | Out-Null
+        if (($now - $last) -lt 86400) { return }
+    }
+
+    # Fetch remote version
+    try {
+        $remoteVer = (Invoke-WebRequest -Uri "$RawBase/VERSION" -TimeoutSec 5 -UseBasicParsing).Content.Trim()
+    } catch {
+        Write-Log "Self-update check failed: $_"
+        return
+    }
+    $localVer = Get-ToolVersion
+
+    # Update timestamp before download — intentional: avoids hammering
+    # the network on repeated failures. Retry happens next day.
+    $now | Set-Content $checkFile -NoNewline
+
+    if ($remoteVer -eq $localVer) { return }
+
+    # Download to temp, then move
+    $tmp = Join-Path $env:TEMP "gemini-self-update"
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Invoke-WebRequest -Uri "$RawBase/patch.ps1"    -OutFile "$tmp\patch.ps1"    -TimeoutSec 10 -UseBasicParsing
+        Invoke-WebRequest -Uri "$RawBase/launcher.vbs" -OutFile "$tmp\launcher.vbs" -TimeoutSec 5  -UseBasicParsing
+        Invoke-WebRequest -Uri "$RawBase/VERSION"      -OutFile "$tmp\VERSION"      -TimeoutSec 5  -UseBasicParsing
+    } catch {
+        Write-Log "Self-update download failed: $_"
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+    Move-Item "$tmp\patch.ps1"    (Join-Path $InstallDir "patch.ps1")    -Force
+    Move-Item "$tmp\launcher.vbs" (Join-Path $InstallDir "launcher.vbs") -Force
+    Move-Item "$tmp\VERSION"      (Join-Path $InstallDir "VERSION")      -Force
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Log "Self-updated from $localVer to $remoteVer"
+}
+
 function Invoke-Run {
+    Update-Self
     Write-Log "Run triggered."
     [void](Invoke-Reconcile -Trigger "run")
 }
@@ -926,6 +972,7 @@ public class RegistryWatcher {
 }
 
 function Invoke-Scheduled {
+    Update-Self
     Write-Log "Scheduled entry triggered."
 
     [void](Invoke-Reconcile -Trigger "startup")

@@ -52,7 +52,7 @@ jobs:
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --unreleased --strip all
+          args: --unreleased --strip all --tag ${{ steps.version.outputs.version }}
 
       - name: Write VERSION
         if: steps.version.outputs.skip == 'false'

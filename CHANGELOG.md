@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Features
+
+- Add shared version and runtime metadata plumbing([b7888d8](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/b7888d833932618ff673494c0332103dbecc4926))
+- Add macos tri-state patch detection([d143c9b](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/d143c9b196b41860326f5fe4858206b4e1728e61))
+- Add macos state-driven reconcile loop([9b76e71](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/9b76e716ccb2e732b9e843d131964ab8ceaacd2b))
+- Add windows state-driven reconcile loop([590b357](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/590b357960972a293449868a6ecb221381939708))
+
+### Bug Fixes
+
+- Resolve windows test runner repo root([6a095ef](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/6a095ef47c738fd80420686ee170bfd256180d7a))
+- Harden core install override seams([0ffea9b](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/0ffea9b4a0dc7d4e1145a3afd50afa661702acf5))
+- Restore macos drifted install path in run/retry([83e0349](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/83e0349bd3a531d6a60cc01718d743a3c198c3cd))
+- Tighten macos tri-state unknown and drift mapping([32c08f9](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/32c08f9365137ef10f15022f624dad158ae8b760))
+- Resolve windows runner repo root in ci([79afd77](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/79afd77c2ee3a486d0b59ea1e9e612922ef6c37b))
+- Stabilize windows install and test flows([8d76874](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/8d76874cdebed91ca1bc002d680a1a15019afd05))
+- Tag release commit after version sync([8e6a3fd](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/8e6a3fdf8b74a6ee47c168e36829ac15d3c5f2cf))
+- Address review feedback across patch flows([805c272](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/805c272d335aabb38eee4588b8a5e4199c6c4b40))
+- Address code review issues across patch flows([059352a](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/059352a0b0a6727e8b2a4ff45b3a6b3eeecb0cfe))
+- Show Chrome running state in status output([88bf8ae](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/88bf8ae0f660b061e0227417a8bfa24d54c36e13))
+- Deterministic release tag and dynamic install paths([2a84a2e](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/2a84a2e9bf94aa31de42440bd0b1a6afb6308665))
+- Use dynamic INSTALL_DIR in recovery hint instead of hardcoded path([fc1a12c](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/fc1a12caf70a9a7c042ebdb2a4ec04a8c0e6059b))
+- Derive install dir from script location and check first-patch result([b3a2cab](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/b3a2cabadec278e357211f7d2c3165578816eba3))
+
+### Refactoring
+
+- Centralize macos state mapping and verify post-install health([f533426](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/f533426ee5bbf0ad9dc30cc8a7f7c524facfa422))
 ## [0.1.3] - 2026-03-26
 
 ### Bug Fixes

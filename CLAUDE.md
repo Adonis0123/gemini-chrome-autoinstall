@@ -28,12 +28,12 @@ Auto-trigger Mechanism
 ### Windows trigger flow
 - **Registry Run key** (`GeminiChromeAutoPatch`): fires `patch.ps1 scheduled` at login
 - `scheduled` subcommand: checks pending installs, then spawns `watch` daemon
-- `watch` daemon: async `RegNotifyChangeKeyValue` with 60s timeout on `HKCU:\Software\Google\Chrome\BLBeacon`, checks pending on each timeout
+- `watch` daemon: async `RegNotifyChangeKeyValue` with 60s timeout on Chrome's Google Update registry key (`pv` value), checks pending on each timeout. Auto-detects correct hive at startup: probes HKCU → HKLM → HKLM\WOW6432Node.
 
-### Version-based skip (replaces cooldown)
-- Compares Chrome's current version against `patched-version.txt`
-- If versions match → skip (already patched for this version)
-- If versions differ → needs patching
+### State-driven detection (tri-state)
+- Reads Chrome's `Local State` JSON to determine patch health
+- Three states: `healthy` (all fields correct), `drifted` (needs patching), `unknown` (can't determine)
+- Checks: `variations_country`, `variations_permanent_consistency_country`, `is_glic_eligible`
 
 ### Pending-retry mechanism
 - When Chrome is running during trigger → create `pending` flag file → exit immediately (no waiting)
@@ -43,14 +43,25 @@ Auto-trigger Mechanism
 ### Concurrency control
 - **Active lock** (atomic `mkdir`): prevents concurrent patch instances, with PID-based stale lock recovery
 
+### Chrome version detection (Windows)
+- Probes registry in order: HKCU → HKLM → HKLM\WOW6432Node under `Software\Google\Update\Clients\{8A69D345-...}\pv`
+- Falls back to `Local State` file's `last_version` field
+- System-wide Chrome installs store version in HKLM, not HKCU
+
+### Install directory derivation
+- `patch.sh`: `INSTALL_DIR` = `$GEMINI_INSTALL_DIR` or `$SCRIPT_DIR` (script's own directory)
+- `patch.ps1`: `$InstallDir` = `$env:GEMINI_INSTALL_DIR` or `$PSScriptRoot`
+- `install.sh`/`install.ps1`: defaults to `~/.gemini-chrome-autoinstall` when creating the install
+
 ### Key paths at runtime
 | Item | macOS | Windows |
 |------|-------|---------|
 | Install dir | `~/.gemini-chrome-autoinstall/` | `%USERPROFILE%\.gemini-chrome-autoinstall\` |
 | Log | `~/Library/Logs/gemini-chrome-autoinstall.log` | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
 | Active lock | `/tmp/gemini-chrome-autoinstall.active.lock/` | `%TEMP%\gemini-chrome-autoinstall.active.lock\` |
-| Pending flag | `~/.gemini-chrome-autoinstall/pending` | `%USERPROFILE%\.gemini-chrome-autoinstall\pending` |
-| Patched version | `~/.gemini-chrome-autoinstall/patched-version.txt` | `%USERPROFILE%\.gemini-chrome-autoinstall\patched-version.txt` |
+| Pending flag | `$INSTALL_DIR/pending` | `$InstallDir\pending` |
+| Last result | `$INSTALL_DIR/last-result` | `$InstallDir\last-result` |
+| Patched version | `$INSTALL_DIR/patched-version.txt` | `$InstallDir\patched-version.txt` |
 
 ## CI/CD
 

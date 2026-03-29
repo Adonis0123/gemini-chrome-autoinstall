@@ -32,7 +32,7 @@ trigger
 
 | Layer | Responsibility |
 |------|----------------|
-| `install.sh` / `install.ps1` | Download scripts, register startup hooks, expose current tool version |
+| `install.sh` / `install.ps1` | Download scripts, register startup hooks, run first patch, check result, expose tool version |
 | `patch.sh` / `patch.ps1` | Detect state, reconcile drift, maintain pending metadata, expose status |
 | Trigger layer | LaunchAgents on macOS, Run key + watcher on Windows |
 
@@ -154,10 +154,21 @@ Windows uses a login startup entry plus a background registry watcher.
 - Run key: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\GeminiChromeAutoPatch`
 - Startup command: `patch.ps1 scheduled`
 
+### Chrome version detection
+
+Chrome version is read from the registry `pv` value. The code probes three paths in order, using the first one that returns a value:
+
+1. `HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}`
+2. `HKLM:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}`
+3. `HKLM:\Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}`
+
+If none contain a version, falls back to `Local State`'s `last_version` field.
+
+Per-user Chrome installs store the version in HKCU. System-wide installs (common on servers and enterprise machines) store it in HKLM. 32-bit Chrome on 64-bit Windows uses the WOW6432Node path.
+
 ### Watch source
 
-- Registry key: `HKCU:\Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}`
-- Version value: `pv`
+The watcher auto-detects the correct registry hive at startup by probing the same three paths above. It monitors whichever key exists with `RegNotifyChangeKeyValue`.
 
 ### Background flow
 
@@ -206,7 +217,31 @@ acquire active lock
 release active lock
 ```
 
-## 10. Status Output
+## 10. Install Directory Derivation
+
+The install scripts (`install.sh` / `install.ps1`) create the install directory at `~/.gemini-chrome-autoinstall` by default. The patch scripts derive their install directory differently:
+
+- `patch.sh`: `INSTALL_DIR` = `$GEMINI_INSTALL_DIR` env var, or `$SCRIPT_DIR` (the script's own directory)
+- `patch.ps1`: `$InstallDir` = `$env:GEMINI_INSTALL_DIR` env var, or `$PSScriptRoot`
+
+This ensures that when the patch script runs from the install directory (via LaunchAgent or Run key), all state files (`pending`, `last-result`, `patched-version.txt`) are written to the correct location even without the env var being set.
+
+## 11. Install Flow
+
+The installer runs a first-time patch after setup and checks the result:
+
+```text
+download scripts to install dir
+  -> register startup hooks (enable)
+  -> run first patch (manual)
+  -> read last-result status
+  -> if healthy: show success banner
+  -> if not healthy: show warning with manual recovery instructions
+```
+
+The installer does not abort on patch failure — auto-monitoring is still registered and will retry. The warning ensures users know the initial state.
+
+## 12. Status Output
 
 Current status output is designed for supportability, not just “is the agent loaded.”
 
@@ -224,7 +259,7 @@ Common fields:
 
 Windows also keeps startup-entry and watcher-process visibility. macOS also shows fallback-agent availability.
 
-## 11. Manual Recovery
+## 13. Manual Recovery
 
 `gemini-chrome-fix` remains the stable escape hatch.
 
@@ -235,7 +270,7 @@ Use it when:
 - `status` shows `verify_failed`
 - you want to force a user-confirmed repair path immediately
 
-## 12. Testing Strategy
+## 14. Testing Strategy
 
 The test suite is organized around fixed `Local State` fixtures and deterministic fake installers.
 

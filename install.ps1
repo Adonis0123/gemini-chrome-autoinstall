@@ -51,6 +51,13 @@ function Download-OrCopy {
 Write-Host "Installing gemini-chrome-autoinstall..."
 Write-Host ""
 
+# Stop old watcher process before overwriting scripts
+$oldWatchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
+foreach ($proc in $oldWatchProcs) {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+}
+
 # Clean up stale locks from previous installs
 $ActiveLock = Join-Path $env:TEMP "gemini-chrome-autoinstall.active.lock"
 if (Test-Path $ActiveLock) { Remove-Item -Path $ActiveLock -Force -Recurse -ErrorAction SilentlyContinue }
@@ -119,6 +126,13 @@ if ($firstPatchOk) {
     Write-Host "You can also run 'gemini-chrome-fix' manually after closing Chrome."
 }
 Write-Host "Tool version: $((Get-Content (Join-Path $InstallDir 'VERSION') -Raw).Trim())"
+# Start fresh watcher in background
+$launcherVbs = Join-Path $InstallDir "launcher.vbs"
+if (Test-Path $launcherVbs) {
+    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$launcherVbs`" watch" -WindowStyle Hidden
+    Write-Host "Background watcher started."
+}
+
 Write-Host ""
 Write-Host "Useful commands:"
 Write-Host "  Check status:  gemini-chrome-status"

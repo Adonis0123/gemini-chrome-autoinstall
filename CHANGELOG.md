@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- Replace Python HTTP server with PowerShell HttpListener in self-update tests([37e5124](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/37e51249b953d65bc0a2256422a60ee67def9bd9))
+## [0.5.0] - 2026-03-29
+
 ### Features
 
 - *(mac)* Add RAW_BASE variable for self-update([6e17ba7](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/6e17ba706c20807eabc4b27ec3f4f48c63c14636))

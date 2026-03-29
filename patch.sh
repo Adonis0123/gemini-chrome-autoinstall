@@ -708,6 +708,7 @@ cmd_status() {
     echo "Pending retry count: ${pending_retry_count}"
     echo "Pending age: ${pending_age}"
     echo "Last attempt: ${last_attempt}"
+    echo "Chrome running: $( [ "$chrome_running" = "1" ] && echo yes || echo no )"
     echo "Fallback agent: ${fallback_agent_state} (30m interval)"
 }
 

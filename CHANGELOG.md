@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Stop old watcher and start fresh one during install([41f4d5e](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/41f4d5e6963307fe17087ac73c437ed29025119e))
+## [0.2.3] - 2026-03-29
+
+### Bug Fixes
+
 - Use staged Chrome shutdown in manual command([bd2cef6](https://github.com/nicepkg/gemini-chrome-autoinstall/commit/bd2cef6429fb2fafc631d8952c2809e12663fa5a))
 ## [0.2.2] - 2026-03-29
 

@@ -108,6 +108,10 @@ if ($profileContent -notmatch 'function gemini-chrome-status') {
     $changed = $true
 }
 
+# Make shortcuts available in current session immediately
+Set-Item -Path "function:global:gemini-chrome-fix" -Value { & "$patchScriptPath" manual }.GetNewClosure()
+Set-Item -Path "function:global:gemini-chrome-status" -Value { & "$patchScriptPath" status }.GetNewClosure()
+
 if ($changed) {
     Write-Host "Shortcut functions added to PowerShell profile."
     Write-Host "  gemini-chrome-fix     -> manual reinstall"

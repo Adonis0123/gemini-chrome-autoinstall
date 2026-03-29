@@ -767,13 +767,24 @@ cmd_manual() {
         read -r response < /dev/tty
         if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
             log "Closing Chrome (user confirmed)..."
-            killall "Google Chrome" 2>/dev/null
+            # Stage 1: graceful AppleScript quit (like Cmd+Q)
+            osascript -e 'quit app "Google Chrome"' 2>/dev/null || true
             reopen_chrome=true
             local waited=0
             while is_chrome_running; do
                 if [ "$waited" -ge 30 ]; then
                     echo "Chrome did not exit in time. Please close it manually and retry."
                     return 1
+                fi
+                # Stage 2: SIGTERM after 10s
+                if [ "$waited" -eq 10 ]; then
+                    log "Chrome still running after graceful quit, sending SIGTERM..."
+                    killall "Google Chrome" 2>/dev/null || true
+                fi
+                # Stage 3: SIGKILL after 20s
+                if [ "$waited" -eq 20 ]; then
+                    log "Chrome still running after SIGTERM, sending SIGKILL..."
+                    killall -9 "Google Chrome" 2>/dev/null || true
                 fi
                 sleep 2
                 waited=$(( waited + 2 ))

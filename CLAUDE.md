@@ -40,6 +40,13 @@ Auto-trigger Mechanism
 - macOS: KeepAlive retry agent detects pending file, retries every 60s until Chrome closes
 - Windows: watch daemon timeout loop checks pending every 60s
 
+### Self-update mechanism
+- Triggered at the start of `run` (macOS) and `run`/`scheduled` (Windows)
+- Fetches `VERSION` from `raw.githubusercontent.com`, compares with local
+- If different, downloads new script files to temp dir, then moves to install dir
+- 24h cooldown via `last-update-check` timestamp file
+- Network failures are logged and silently skipped — never blocks core patch logic
+
 ### Concurrency control
 - **Active lock** (atomic `mkdir`): prevents concurrent patch instances, with PID-based stale lock recovery
 
@@ -62,6 +69,7 @@ Auto-trigger Mechanism
 | Pending flag | `$INSTALL_DIR/pending` | `$InstallDir\pending` |
 | Last result | `$INSTALL_DIR/last-result` | `$InstallDir\last-result` |
 | Patched version | `$INSTALL_DIR/patched-version.txt` | `$InstallDir\patched-version.txt` |
+| Update check | `$INSTALL_DIR/last-update-check` | `$InstallDir\last-update-check` |
 
 ## CI/CD
 

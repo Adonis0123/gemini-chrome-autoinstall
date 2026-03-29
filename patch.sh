@@ -426,7 +426,7 @@ perform_patch_and_verify() {
 
     if ! run_core_install; then
         upsert_pending_record "patch_failed" "$patch_reason"
-        write_last_result "patch_failed" "$patch_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+        write_last_result "patch_failed" "$patch_reason" "$chrome_ver" "Run $INSTALL_DIR/patch.sh manual"
         disarm_active_lock_cleanup
         release_active_lock
         return 1
@@ -439,7 +439,7 @@ perform_patch_and_verify() {
 
     if [ "$verify_state" != "healthy" ]; then
         upsert_pending_record "verify_failed" "$verify_reason"
-        write_last_result "verify_failed" "$verify_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+        write_last_result "verify_failed" "$verify_reason" "$chrome_ver" "Run $INSTALL_DIR/patch.sh manual"
         disarm_active_lock_cleanup
         release_active_lock
         return 1
@@ -487,7 +487,7 @@ reconcile_patch_state() {
                 perform_patch_and_verify "$pending_patch_reason"
                 return $?
             fi
-            write_last_result "detect_error" "$patch_reason" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+            write_last_result "detect_error" "$patch_reason" "$chrome_ver" "Run $INSTALL_DIR/patch.sh manual"
             return 1
             ;;
         drifted)
@@ -500,7 +500,7 @@ reconcile_patch_state() {
             return $?
             ;;
         *)
-            write_last_result "detect_error" "unknown_patch_state:$patch_state" "$chrome_ver" "Run ~/.gemini-chrome-autoinstall/patch.sh manual"
+            write_last_result "detect_error" "unknown_patch_state:$patch_state" "$chrome_ver" "Run $INSTALL_DIR/patch.sh manual"
             return 1
             ;;
     esac

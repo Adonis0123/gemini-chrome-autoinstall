@@ -164,6 +164,12 @@ get_chrome_version_or_unknown() {
 }
 
 is_chrome_running() {
+    if [ -n "${GEMINI_CHROME_RUNNING_FILE:-}" ] && [ -f "$GEMINI_CHROME_RUNNING_FILE" ]; then
+        local val
+        val=$(cat "$GEMINI_CHROME_RUNNING_FILE" 2>/dev/null)
+        [ "$val" = "1" ]
+        return $?
+    fi
     if [ -n "${GEMINI_CHROME_RUNNING:-}" ]; then
         [ "${GEMINI_CHROME_RUNNING}" = "1" ]
         return $?

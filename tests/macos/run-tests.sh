@@ -219,17 +219,15 @@ if run_case "watcher-patches-on-chrome-close" bash -c "
   export GEMINI_FAKE_INSTALL_MODE='success'
   export GEMINI_CHROME_VERSION='136.0.7103.49'
   export GEMINI_LOG_FILE='$WATCHER_RUNTIME_DIR/test.log'
+  export GEMINI_CHROME_RUNNING_FILE='$WATCHER_RUNTIME_DIR/chrome-running'
 
-  fake_bin='${TMPDIR}/Google Chrome'
-  cp /bin/sleep \"\$fake_bin\" 2>/dev/null || true; chmod +x \"\$fake_bin\"
-  \"\$fake_bin\" 9999 &
-  CHROME_PID=\$!
+  echo '1' > '$WATCHER_RUNTIME_DIR/chrome-running'
 
   bash patch.sh watcher &
   WATCHER_PID=\$!
   sleep 2
 
-  kill \"\$CHROME_PID\" 2>/dev/null; wait \"\$CHROME_PID\" 2>/dev/null || true
+  echo '0' > '$WATCHER_RUNTIME_DIR/chrome-running'
 
   for i in \$(seq 1 10); do
     kill -0 \"\$WATCHER_PID\" 2>/dev/null || break
@@ -279,18 +277,16 @@ if run_case "watcher-response-time" bash -c "
   export GEMINI_FAKE_INSTALL_MODE='success'
   export GEMINI_CHROME_VERSION='136.0.7103.49'
   export GEMINI_LOG_FILE='$WATCHER_PERF_DIR/test.log'
+  export GEMINI_CHROME_RUNNING_FILE='$WATCHER_PERF_DIR/chrome-running'
 
-  fake_bin='${TMPDIR}/Google Chrome'
-  cp /bin/sleep \"\$fake_bin\" 2>/dev/null || true; chmod +x \"\$fake_bin\"
-  \"\$fake_bin\" 9999 &
-  CPID=\$!
+  echo '1' > '$WATCHER_PERF_DIR/chrome-running'
 
   bash patch.sh watcher &
   WPID=\$!
   sleep 1
 
   BEFORE=\$(date +%s)
-  kill \"\$CPID\" 2>/dev/null; wait \"\$CPID\" 2>/dev/null || true
+  echo '0' > '$WATCHER_PERF_DIR/chrome-running'
 
   for i in \$(seq 1 10); do
     kill -0 \"\$WPID\" 2>/dev/null || break
@@ -313,11 +309,9 @@ if run_case "watcher-cpu-idle" bash -c "
   export GEMINI_LOCAL_STATE_PATH='$FIXTURE_DIR/healthy.json'
   export GEMINI_CHROME_VERSION='136.0.7103.49'
   export GEMINI_LOG_FILE='$WATCHER_CPU_DIR/test.log'
+  export GEMINI_CHROME_RUNNING_FILE='$WATCHER_CPU_DIR/chrome-running'
 
-  fake_bin='${TMPDIR}/Google Chrome'
-  cp /bin/sleep \"\$fake_bin\" 2>/dev/null || true; chmod +x \"\$fake_bin\"
-  \"\$fake_bin\" 9999 &
-  CPID=\$!
+  echo '1' > '$WATCHER_CPU_DIR/chrome-running'
 
   bash patch.sh watcher &
   WPID=\$!
@@ -326,7 +320,7 @@ if run_case "watcher-cpu-idle" bash -c "
   CPUTIME=\$(ps -p \"\$WPID\" -o cputime= 2>/dev/null || echo '0:00.00')
   echo \"watcher_cputime=\${CPUTIME}\"
 
-  kill \"\$CPID\" 2>/dev/null; wait \"\$CPID\" 2>/dev/null || true
+  echo '0' > '$WATCHER_CPU_DIR/chrome-running'
   for i in \$(seq 1 10); do kill -0 \"\$WPID\" 2>/dev/null || break; sleep 1; done
   wait \"\$WPID\" 2>/dev/null || true
 
@@ -346,11 +340,6 @@ if run_case "watcher-cleanup-on-uninstall" bash -c "
   export GEMINI_CHROME_RUNNING='1'
   export GEMINI_LOG_FILE='$WATCHER_UNINST_DIR/test.log'
 
-  fake_bin='${TMPDIR}/Google Chrome'
-  cp /bin/sleep \"\$fake_bin\" 2>/dev/null || true; chmod +x \"\$fake_bin\"
-  \"\$fake_bin\" 9999 &
-  CPID=\$!
-
   bash patch.sh watcher &
   WPID=\$!
   sleep 1
@@ -362,11 +351,9 @@ if run_case "watcher-cleanup-on-uninstall" bash -c "
   sleep 1
   if kill -0 \"\$WPID\" 2>/dev/null; then
     echo 'FAIL: watcher still running after uninstall'
-    kill \"\$CPID\" 2>/dev/null; wait \"\$CPID\" 2>/dev/null || true
     exit 1
   fi
   echo 'watcher_killed=yes'
-  kill \"\$CPID\" 2>/dev/null; wait \"\$CPID\" 2>/dev/null || true
 "; then
   assert_contains "${CASE_OUTPUT}" "watcher_killed=yes"
 fi

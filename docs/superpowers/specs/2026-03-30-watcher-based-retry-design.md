@@ -36,12 +36,13 @@ retry agent (60s, no backoff) → backs up watcher; spawns new watcher if needed
 Responsibilities:
 1. Write `$PID $EPOCH_SECONDS` to `$INSTALL_DIR/watcher.pid`; exit if another watcher is already running (validate PID alive via `kill -0` AND startup timestamp matches to guard against PID reuse)
 2. Loop: `pgrep -x "Google Chrome"` + `sleep 3`
-3. When Chrome closes: remove PID file, call `reconcile_patch_state "watcher"` inline (not `exec "$0" run`, to avoid triggering self-update or re-entering full cmd_run flow)
+3. When Chrome closes: remove PID file, call `reconcile_patch_state "watcher"` inline (not `exec "$0" run`, to avoid triggering self-update or re-entering full cmd_run flow). Watcher is **fire-once**: exits after reconcile regardless of success or failure. If reconcile fails, retry agent handles subsequent attempts.
 4. Trap on EXIT to clean up PID file
+5. When `reconcile_patch_state` encounters `unknown` state with trigger `"watcher"`, it follows the same conservative path as `"run"` — logs `detect_error` and returns without force-patching. This is intentional.
 
 ### New `spawn_watcher` helper
 
-Called from within `reconcile_patch_state` in the `drifted` branch, after `upsert_pending_record` and before `return`, when Chrome is detected as running. Also called from `cmd_retry` when Chrome is running.
+Called from within `reconcile_patch_state` in the `drifted` branch, after `upsert_pending_record` and `write_last_result`, before `return 0`, when Chrome is detected as running. Also called from `cmd_retry` when Chrome is running.
 
 1. Check PID file — if valid watcher already running (PID alive + timestamp match), skip
 2. Launch `"$0" watcher >> "$LOG_FILE" 2>&1 &` + `disown` (log to main log file, not /dev/null)
@@ -132,6 +133,7 @@ Windows tests focus on the reduced `$RetryInterval` behavior and backoff removal
 
 - **Add**: `cmd_watcher` subcommand (~30 lines)
 - **Add**: `spawn_watcher()` helper (~15 lines)
+- **Modify**: main `case` dispatch block — add `watcher)` case + update usage text
 - **Modify**: `reconcile_patch_state` — call `spawn_watcher` in drifted + chrome_running branch
 - **Modify**: `cmd_retry` — check watcher alive → early return; else spawn_watcher or patch
 - **Modify**: `cmd_status` — display watcher running state from PID file

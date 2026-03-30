@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- *(macos)* Add watcher-based retry — spawn background watcher when Chrome is running([df9ab50](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/df9ab501b2573c23ffde81dfb7b2bbb8c58d457f))
+- *(windows)* Reduce RetryInterval 60→10, remove backoff logic([b555842](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/b5558424575555c4d1f9d4d621323a205c53848f))
+
+### Bug Fixes
+
+- Use GEMINI_CHROME_RUNNING_FILE for watcher tests([8ee7284](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/8ee72849bbc00f429e9950943ee2dc75ab480abd))
+- *(macos)* Ensure INSTALL_DIR exists before self-update check, harden watcher lifecycle([8d84f48](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/8d84f4825c7131cb25b03f894c6a582820917674))
+- *(windows)* Prevent duplicate watch daemons via PID file lock([01e03c5](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/01e03c56a7c525a28de41c80d1119605bfa5f7ab))
+- Harden watcher PID checks and remove redundant call([5a20f5e](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/5a20f5e4d910dc9f6a344c5ec7cc51730a966bc2))
+## [0.5.2] - 2026-03-29
+
 ### Bug Fixes
 
 - Correct repository URL in cliff.toml from nicepkg to Adonis0123([d9be03c](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/d9be03cad0c046d3638c2e2aad42988f8b9b9a9a))

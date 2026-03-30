@@ -437,6 +437,18 @@ is_watcher_running() {
     return 0
 }
 
+kill_watcher() {
+    if is_watcher_running; then
+        local watcher_pid
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        if [ -n "$watcher_pid" ]; then
+            kill "$watcher_pid" 2>/dev/null || true
+            log "Killed watcher process (PID $watcher_pid)."
+        fi
+    fi
+    rm -f "$WATCHER_PID_FILE"
+}
+
 remove_pending() {
     rm -f "$PENDING_FILE"
 }
@@ -665,6 +677,7 @@ cmd_disable() {
         rm -f "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
     fi
 
+    kill_watcher
     log "Disabled: boot/watcher/retry/fallback LaunchAgents unloaded and removed."
     echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now disabled."
 }
@@ -751,15 +764,7 @@ cmd_status() {
 }
 
 cmd_uninstall() {
-    # Kill watcher process if running
-    if [ -f "$WATCHER_PID_FILE" ]; then
-        local watcher_pid
-        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
-        if [ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null; then
-            kill "$watcher_pid" 2>/dev/null || true
-            log "Killed watcher process (PID $watcher_pid)."
-        fi
-    fi
+    kill_watcher
     cmd_disable
     rm -rf "$ACTIVE_LOCK_DIR" 2>/dev/null || true
     rm -rf "$INSTALL_DIR"
@@ -768,6 +773,7 @@ cmd_uninstall() {
 }
 
 check_self_update() {
+    mkdir -p "$INSTALL_DIR"
     local check_file="$INSTALL_DIR/last-update-check"
     local now=$(date +%s)
 

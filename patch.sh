@@ -16,6 +16,7 @@ PENDING_FILE="$INSTALL_DIR/pending"
 PATCHED_VERSION_FILE="$INSTALL_DIR/patched-version.txt"
 LAST_RESULT_FILE="$INSTALL_DIR/last-result"
 ACTIVE_LOCK_DIR="/tmp/gemini-chrome-autoinstall.active.lock"
+WATCHER_PID_FILE="$INSTALL_DIR/watcher.pid"
 LOG_FILE="${GEMINI_LOG_FILE:-$HOME/Library/Logs/gemini-chrome-autoinstall.log}"
 LOCAL_STATE_FILE="${GEMINI_LOCAL_STATE_PATH:-$HOME/Library/Application Support/Google/Chrome/Local State}"
 TOOL_VERSION_FILE="${SCRIPT_DIR}/VERSION"
@@ -405,12 +406,29 @@ upsert_pending_record() {
     write_pending_metadata "$reason" "$patch_reason" "$first_seen_at" "$now" "$retry_count" "$detected_version"
 }
 
-should_attempt_retry_now() {
-    local retry_count="$1"
-    if [ "$retry_count" -lt 10 ]; then
-        return 0
+is_watcher_running() {
+    if [ ! -f "$WATCHER_PID_FILE" ]; then
+        return 1
     fi
-    [ $(( retry_count % 5 )) -eq 0 ]
+    local saved_pid saved_ts
+    read -r saved_pid saved_ts < "$WATCHER_PID_FILE" 2>/dev/null || return 1
+    if [ -z "$saved_pid" ] || [ -z "$saved_ts" ]; then
+        return 1
+    fi
+    if ! kill -0 "$saved_pid" 2>/dev/null; then
+        return 1
+    fi
+    # Guard against PID reuse: check process start time
+    local proc_start
+    proc_start=$(ps -p "$saved_pid" -o lstart= 2>/dev/null) || return 1
+    local proc_epoch
+    proc_epoch=$(date -j -f "%a %b %d %T %Y" "$proc_start" "+%s" 2>/dev/null) || return 1
+    # Allow 2s tolerance for start time rounding
+    local diff=$(( proc_epoch - saved_ts ))
+    if [ "$diff" -lt -2 ] || [ "$diff" -gt 2 ]; then
+        return 1
+    fi
+    return 0
 }
 
 remove_pending() {
@@ -499,6 +517,7 @@ reconcile_patch_state() {
             if is_chrome_running; then
                 upsert_pending_record "blocked" "$patch_reason"
                 write_last_result "blocked" "$patch_reason" "$chrome_ver" "Will auto-fix after Chrome closes"
+                spawn_watcher
                 return 0
             fi
             perform_patch_and_verify "$patch_reason"
@@ -704,6 +723,13 @@ cmd_status() {
         fallback_agent_state="enabled"
     fi
 
+    local watcher_state="not running"
+    if is_watcher_running; then
+        local watcher_pid
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        watcher_state="running (PID $watcher_pid)"
+    fi
+
     echo "Tool version: $(get_tool_version)"
     echo "Chrome version: ${chrome_ver}"
     echo "Last healthy version: ${patched_ver}"
@@ -715,9 +741,19 @@ cmd_status() {
     echo "Last attempt: ${last_attempt}"
     echo "Chrome running: $( [ "$chrome_running" = "1" ] && echo yes || echo no )"
     echo "Fallback agent: ${fallback_agent_state} (30m interval)"
+    echo "Watcher process: ${watcher_state}"
 }
 
 cmd_uninstall() {
+    # Kill watcher process if running
+    if [ -f "$WATCHER_PID_FILE" ]; then
+        local watcher_pid
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        if [ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null; then
+            kill "$watcher_pid" 2>/dev/null || true
+            log "Killed watcher process (PID $watcher_pid)."
+        fi
+    fi
     cmd_disable
     rm -rf "$ACTIVE_LOCK_DIR" 2>/dev/null || true
     rm -rf "$INSTALL_DIR"
@@ -768,6 +804,42 @@ check_self_update() {
     log "Self-updated from $local_ver to $remote_ver"
 }
 
+cmd_watcher() {
+    local pid_file="$WATCHER_PID_FILE"
+    if is_watcher_running; then
+        log "Watcher: another instance already running, exiting."
+        return 0
+    fi
+
+    local my_ts
+    my_ts=$(date +%s)
+    echo "$$ $my_ts" > "$pid_file"
+    trap 'rm -f "$pid_file"' EXIT
+
+    log "Watcher started (PID=$$), waiting for Chrome to close..."
+
+    while is_chrome_running; do
+        sleep 3
+    done
+
+    log "Watcher: Chrome closed, triggering reconcile."
+    rm -f "$pid_file"
+    trap - EXIT
+
+    NEEDS_PATCH_CHROME_VERSION="$(get_chrome_version_or_unknown)"
+    reconcile_patch_state "watcher" || true
+}
+
+spawn_watcher() {
+    if is_watcher_running; then
+        log "Watcher already running, skipping spawn."
+        return 0
+    fi
+    "$0" watcher >> "$LOG_FILE" 2>&1 &
+    disown
+    log "Watcher spawned (PID=$!)."
+}
+
 cmd_run() {
     check_self_update
     log "Run triggered."
@@ -788,18 +860,14 @@ cmd_retry() {
     pending_patch_reason=$(get_pending_patch_reason)
 
     if is_chrome_running; then
+        if is_watcher_running; then
+            log "Retry: watcher already active, skipping."
+            return 0
+        fi
         upsert_pending_record "blocked" "$pending_patch_reason"
-        log "Retry: Chrome still running. Will retry later."
         write_last_result "blocked" "$pending_patch_reason" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "Will auto-fix after Chrome closes"
-        return 0
-    fi
-
-    local retry_count
-    retry_count=$(get_pending_retry_count)
-    if ! should_attempt_retry_now "$retry_count"; then
-        upsert_pending_record "backoff_wait" "$pending_patch_reason"
-        write_last_result "blocked" "retry_backoff" "${NEEDS_PATCH_CHROME_VERSION:-unknown}" "Waiting for next automatic retry window"
-        log "Retry throttled by internal backoff (retry_count=${retry_count})."
+        spawn_watcher
+        log "Retry: Chrome still running. Watcher spawned."
         return 0
     fi
 
@@ -867,9 +935,10 @@ case "${1:-help}" in
     status)    cmd_status ;;
     run)       cmd_run ;;
     retry)     cmd_retry ;;
+    watcher)   cmd_watcher ;;
     manual)    cmd_manual ;;
     *)
-        echo "Usage: $0 {enable|disable|uninstall|status|run|retry|manual}"
+        echo "Usage: $0 {enable|disable|uninstall|status|run|retry|watcher|manual}"
         echo ""
         echo "Commands:"
         echo "  enable      Install and load boot/watcher/retry/fallback LaunchAgents"
@@ -878,6 +947,7 @@ case "${1:-help}" in
         echo "  status      Show current status"
         echo "  run         Reconcile local state (creates/updates pending if blocked)"
         echo "  retry       Retry pending reconcile (called by KeepAlive agent)"
+        echo "  watcher     Watch for Chrome to close and patch immediately (internal)"
         echo "  manual      Re-install immediately after you close Chrome"
         exit 1
         ;;

@@ -22,7 +22,7 @@ $CoreInstallCommand = $env:GEMINI_CORE_INSTALL_CMD
 $ChromeUpdateSubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateVersionName = "pv"
-$RetryInterval = 60  # seconds
+$RetryInterval = 10  # seconds — reduced for faster Chrome-close detection
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
 $script:NeedsPatchChromeVersion = $null
 $Repo = "Adonis0123/gemini-chrome-autoinstall"
@@ -459,16 +459,6 @@ function Upsert-PendingRecord {
     Write-Log "Pending record updated ($Reason / $PatchReason, retry_count=$retryCount)."
 }
 
-function Should-AttemptRetryNow {
-    param([int]$RetryCount)
-
-    if ($RetryCount -lt 10) {
-        return $true
-    }
-
-    return ($RetryCount % 5) -eq 0
-}
-
 function Remove-Pending {
     Remove-Item -Path $PendingFile -Force -ErrorAction SilentlyContinue
 }
@@ -569,14 +559,6 @@ function Invoke-PendingInstall {
     if (Test-IsChromeRunning) {
         Upsert-PendingRecord -Reason "blocked" -PatchReason $pendingPatchReason
         Write-LastResult -Status "blocked" -Reason $pendingPatchReason -ChromeVersion $script:NeedsPatchChromeVersion -Hint "Will auto-fix after Chrome closes"
-        return
-    }
-
-    $retryCount = Get-PendingRetryCount
-    if (-not (Should-AttemptRetryNow -RetryCount $retryCount)) {
-        Upsert-PendingRecord -Reason "backoff_wait" -PatchReason $pendingPatchReason
-        Write-LastResult -Status "blocked" -Reason "retry_backoff" -ChromeVersion $script:NeedsPatchChromeVersion -Hint "Waiting for next automatic retry window"
-        Write-Log "Retry throttled by internal backoff (retry_count=$retryCount)."
         return
     }
 

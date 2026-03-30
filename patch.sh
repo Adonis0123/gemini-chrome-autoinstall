@@ -764,7 +764,6 @@ cmd_status() {
 }
 
 cmd_uninstall() {
-    kill_watcher
     cmd_disable
     rm -rf "$ACTIVE_LOCK_DIR" 2>/dev/null || true
     rm -rf "$INSTALL_DIR"

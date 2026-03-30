@@ -630,9 +630,9 @@ function Invoke-Status {
         Write-Host "  Startup:      NOT REGISTERED"
     }
 
-    if (Test-WatcherRunning) {
-        $watcherPid = (Get-Content $WatcherPidFile -ErrorAction SilentlyContinue).Trim()
-        Write-Host "  Watcher:      RUNNING (PID $watcherPid)"
+    $watcherPidContent = Get-Content $WatcherPidFile -ErrorAction SilentlyContinue
+    if ($watcherPidContent -and (Test-WatcherRunning)) {
+        Write-Host "  Watcher:      RUNNING (PID $($watcherPidContent.Trim()))"
     } else {
         Write-Host "  Watcher:      not running"
     }
@@ -784,7 +784,10 @@ function Test-WatcherRunning {
         $savedPid = (Get-Content $WatcherPidFile -ErrorAction Stop).Trim()
         if (-not $savedPid) { return $false }
         $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
-        if ($proc -and -not $proc.HasExited) { return $true }
+        if (-not $proc -or $proc.HasExited) { return $false }
+        # Verify the process is actually our watcher (guard against PID reuse)
+        $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$savedPid" -ErrorAction SilentlyContinue
+        if ($wmi -and $wmi.CommandLine -match "patch\.ps1.*watch") { return $true }
     } catch {}
     return $false
 }

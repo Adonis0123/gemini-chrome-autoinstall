@@ -23,6 +23,7 @@ $ChromeUpdateSubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A
 $ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateVersionName = "pv"
 $RetryInterval = 10  # seconds — reduced for faster Chrome-close detection
+$WatcherPidFile = Join-Path $InstallDir "watcher.pid"
 $CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
 $script:NeedsPatchChromeVersion = $null
 $Repo = "Adonis0123/gemini-chrome-autoinstall"
@@ -629,10 +630,9 @@ function Invoke-Status {
         Write-Host "  Startup:      NOT REGISTERED"
     }
 
-    $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
-    if ($watchProcs) {
-        Write-Host "  Watcher:      RUNNING (PID $($watchProcs[0].ProcessId))"
+    if (Test-WatcherRunning) {
+        $watcherPid = (Get-Content $WatcherPidFile -ErrorAction SilentlyContinue).Trim()
+        Write-Host "  Watcher:      RUNNING (PID $watcherPid)"
     } else {
         Write-Host "  Watcher:      not running"
     }
@@ -778,7 +778,25 @@ function Invoke-Manual {
     }
 }
 
+function Test-WatcherRunning {
+    if (-not (Test-Path $WatcherPidFile)) { return $false }
+    try {
+        $savedPid = (Get-Content $WatcherPidFile -ErrorAction Stop).Trim()
+        if (-not $savedPid) { return $false }
+        $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+        if ($proc -and -not $proc.HasExited) { return $true }
+    } catch {}
+    return $false
+}
+
 function Invoke-Watch {
+    if (Test-WatcherRunning) {
+        Write-Log "Watch: another instance already running, exiting."
+        return
+    }
+
+    # Write PID file
+    $PID | Set-Content $WatcherPidFile -Force
     Write-Log "Watch started: monitoring Google Update version changes."
 
     $currentVersion = Get-ChromeVersion
@@ -949,6 +967,7 @@ public class RegistryWatcher {
         if ($hEvent -ne [IntPtr]::Zero) {
             [RegistryWatcher]::CloseHandle($hEvent) | Out-Null
         }
+        Remove-Item $WatcherPidFile -Force -ErrorAction SilentlyContinue
         Write-Log "Watch stopped."
     }
 }
@@ -960,10 +979,7 @@ function Invoke-Scheduled {
     [void](Invoke-Reconcile -Trigger "startup")
 
     # Ensure watch process is running
-    $watchRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
-
-    if (-not $watchRunning) {
+    if (-not (Test-WatcherRunning)) {
         Write-Log "Scheduled: starting watch process in background."
         $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
         Start-Process -FilePath "wscript.exe" `

@@ -559,6 +559,8 @@ cmd_enable() {
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -581,6 +583,8 @@ EOF
 	<array>
 		<string>/Applications/Google Chrome.app/Contents/Info.plist</string>
 	</array>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -609,6 +613,8 @@ EOF
 	</dict>
 	<key>ThrottleInterval</key>
 	<integer>60</integer>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -629,6 +635,8 @@ EOF
 	</array>
 	<key>StartInterval</key>
 	<integer>1800</integer>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -665,6 +673,7 @@ cmd_disable() {
         rm -f "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
     fi
 
+    kill_watcher
     log "Disabled: boot/watcher/retry/fallback LaunchAgents unloaded and removed."
     echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now disabled."
 }

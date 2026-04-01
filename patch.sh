@@ -560,11 +560,11 @@ ensure_plists_current() {
         return 0
     fi
     log "LaunchAgent plists outdated (v${installed_version} -> v${PLIST_VERSION}), refreshing..."
-    # Trap SIGTERM: launchctl unload sends SIGTERM to the current process
-    # group when unloading the agent that spawned us; we must survive it
-    # to finish writing new plists and reloading agents.
+    # Best-effort: never block the main patch/retry flow on plist refresh.
+    # Trap SIGTERM so we survive launchd's process-group cleanup during
+    # agent reload. Errors are logged but do not abort run/retry.
     trap '' TERM
-    cmd_enable > /dev/null
+    cmd_enable > /dev/null 2>&1 || log "Warning: plist refresh failed, will retry next cycle."
     trap - TERM
 }
 
@@ -675,12 +675,16 @@ EOF
 </plist>
 EOF
 
+    # Write version stamp BEFORE loading agents to prevent reentry:
+    # RunAtLoad/PathState agents fire immediately on load; the new process
+    # must see the current version to skip ensure_plists_current().
+    printf '%s' "$PLIST_VERSION" > "$INSTALL_DIR/plist-version"
+
     launchctl load "$LAUNCH_AGENTS_DIR/$BOOT_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
 
-    printf '%s' "$PLIST_VERSION" > "$INSTALL_DIR/plist-version"
     log "Enabled: boot/watcher/retry/fallback LaunchAgents loaded."
     echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now enabled."
 }

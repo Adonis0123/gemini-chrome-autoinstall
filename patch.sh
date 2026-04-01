@@ -25,6 +25,7 @@ CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/mai
 PROCESS_NAME="gemini-chrome-autopatch"
 LAUNCH_EXECUTABLE="${SCRIPT_DIR}/${PROCESS_NAME}"
 NEEDS_PATCH_CHROME_VERSION=""
+PLIST_VERSION="2"
 REPO="Adonis0123/gemini-chrome-autoinstall"
 BRANCH="master"
 RAW_BASE="${GEMINI_RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
@@ -440,7 +441,7 @@ is_watcher_running() {
 kill_watcher() {
     if is_watcher_running; then
         local watcher_pid
-        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null || true
         if [ -n "$watcher_pid" ]; then
             kill "$watcher_pid" 2>/dev/null || true
             log "Killed watcher process (PID $watcher_pid)."
@@ -548,6 +549,38 @@ reconcile_patch_state() {
     esac
 }
 
+ensure_plists_current() {
+    # Only refresh if agents are currently installed
+    if [ ! -f "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" ]; then
+        return 0
+    fi
+    local installed_version
+    installed_version=$(cat "$INSTALL_DIR/plist-version" 2>/dev/null || echo "0")
+    if [ "$installed_version" = "$PLIST_VERSION" ]; then
+        return 0
+    fi
+    # Prevent reentry: RunAtLoad/PathState agents fire immediately on load
+    # and would re-enter this function before plist-version is written.
+    if [ -f "$INSTALL_DIR/plist-refreshing" ]; then
+        local marker_ts now
+        marker_ts=$(cat "$INSTALL_DIR/plist-refreshing" 2>/dev/null || echo "0")
+        now=$(date +%s)
+        if [ $(( now - marker_ts )) -lt 120 ]; then
+            return 0
+        fi
+        rm -f "$INSTALL_DIR/plist-refreshing"
+    fi
+    log "LaunchAgent plists outdated (v${installed_version} -> v${PLIST_VERSION}), refreshing..."
+    date +%s > "$INSTALL_DIR/plist-refreshing"
+    # Best-effort: never block the main patch/retry flow on plist refresh.
+    # Trap SIGTERM so we survive launchd's process-group cleanup during
+    # agent reload. Errors are logged but do not abort run/retry.
+    trap '' TERM
+    cmd_enable > /dev/null 2>&1 || log "Warning: plist refresh failed, will retry next cycle."
+    trap - TERM
+    rm -f "$INSTALL_DIR/plist-refreshing"
+}
+
 cmd_enable() {
     mkdir -p "$LAUNCH_AGENTS_DIR"
 
@@ -571,6 +604,8 @@ cmd_enable() {
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -593,6 +628,8 @@ EOF
 	<array>
 		<string>/Applications/Google Chrome.app/Contents/Info.plist</string>
 	</array>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -621,6 +658,8 @@ EOF
 	</dict>
 	<key>ThrottleInterval</key>
 	<integer>60</integer>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -641,6 +680,8 @@ EOF
 	</array>
 	<key>StartInterval</key>
 	<integer>1800</integer>
+	<key>AbandonProcessGroup</key>
+	<true/>
 	<key>StandardErrorPath</key>
 	<string>${LOG_FILE}</string>
 </dict>
@@ -652,6 +693,11 @@ EOF
     launchctl load "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
 
+    # Write version stamp AFTER loading: if any load fails above,
+    # the version stays old so ensure_plists_current retries next cycle.
+    # Reentry from RunAtLoad/PathState is blocked by the plist-refreshing
+    # marker in ensure_plists_current, not by this stamp.
+    printf '%s' "$PLIST_VERSION" > "$INSTALL_DIR/plist-version"
     log "Enabled: boot/watcher/retry/fallback LaunchAgents loaded."
     echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now enabled."
 }
@@ -745,7 +791,7 @@ cmd_status() {
     local watcher_state="not running"
     if is_watcher_running; then
         local watcher_pid
-        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null || true
         watcher_state="running (PID $watcher_pid)"
     fi
 
@@ -853,6 +899,7 @@ spawn_watcher() {
 
 cmd_run() {
     check_self_update
+    ensure_plists_current
     log "Run triggered."
     reconcile_patch_state "run" || true
 
@@ -863,6 +910,7 @@ cmd_retry() {
     if [ ! -f "$PENDING_FILE" ]; then
         return 0
     fi
+    ensure_plists_current
 
     log "Retry: pending install found."
     NEEDS_PATCH_CHROME_VERSION="$(get_chrome_version_or_unknown)"

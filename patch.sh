@@ -559,13 +559,26 @@ ensure_plists_current() {
     if [ "$installed_version" = "$PLIST_VERSION" ]; then
         return 0
     fi
+    # Prevent reentry: RunAtLoad/PathState agents fire immediately on load
+    # and would re-enter this function before plist-version is written.
+    if [ -f "$INSTALL_DIR/plist-refreshing" ]; then
+        local marker_ts now
+        marker_ts=$(cat "$INSTALL_DIR/plist-refreshing" 2>/dev/null || echo "0")
+        now=$(date +%s)
+        if [ $(( now - marker_ts )) -lt 120 ]; then
+            return 0
+        fi
+        rm -f "$INSTALL_DIR/plist-refreshing"
+    fi
     log "LaunchAgent plists outdated (v${installed_version} -> v${PLIST_VERSION}), refreshing..."
+    date +%s > "$INSTALL_DIR/plist-refreshing"
     # Best-effort: never block the main patch/retry flow on plist refresh.
     # Trap SIGTERM so we survive launchd's process-group cleanup during
     # agent reload. Errors are logged but do not abort run/retry.
     trap '' TERM
     cmd_enable > /dev/null 2>&1 || log "Warning: plist refresh failed, will retry next cycle."
     trap - TERM
+    rm -f "$INSTALL_DIR/plist-refreshing"
 }
 
 cmd_enable() {
@@ -675,16 +688,16 @@ EOF
 </plist>
 EOF
 
-    # Write version stamp BEFORE loading agents to prevent reentry:
-    # RunAtLoad/PathState agents fire immediately on load; the new process
-    # must see the current version to skip ensure_plists_current().
-    printf '%s' "$PLIST_VERSION" > "$INSTALL_DIR/plist-version"
-
     launchctl load "$LAUNCH_AGENTS_DIR/$BOOT_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$WATCHER_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
 
+    # Write version stamp AFTER loading: if any load fails above,
+    # the version stays old so ensure_plists_current retries next cycle.
+    # Reentry from RunAtLoad/PathState is blocked by the plist-refreshing
+    # marker in ensure_plists_current, not by this stamp.
+    printf '%s' "$PLIST_VERSION" > "$INSTALL_DIR/plist-version"
     log "Enabled: boot/watcher/retry/fallback LaunchAgents loaded."
     echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now enabled."
 }

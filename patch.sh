@@ -440,7 +440,7 @@ is_watcher_running() {
 kill_watcher() {
     if is_watcher_running; then
         local watcher_pid
-        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null || true
         if [ -n "$watcher_pid" ]; then
             kill "$watcher_pid" 2>/dev/null || true
             log "Killed watcher process (PID $watcher_pid)."
@@ -753,7 +753,7 @@ cmd_status() {
     local watcher_state="not running"
     if is_watcher_running; then
         local watcher_pid
-        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null
+        read -r watcher_pid _ < "$WATCHER_PID_FILE" 2>/dev/null || true
         watcher_state="running (PID $watcher_pid)"
     fi
 

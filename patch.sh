@@ -25,6 +25,7 @@ CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/mai
 PROCESS_NAME="gemini-chrome-autopatch"
 LAUNCH_EXECUTABLE="${SCRIPT_DIR}/${PROCESS_NAME}"
 NEEDS_PATCH_CHROME_VERSION=""
+PLIST_VERSION="2"
 REPO="Adonis0123/gemini-chrome-autoinstall"
 BRANCH="master"
 RAW_BASE="${GEMINI_RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
@@ -548,6 +549,25 @@ reconcile_patch_state() {
     esac
 }
 
+ensure_plists_current() {
+    # Only refresh if agents are currently installed
+    if [ ! -f "$LAUNCH_AGENTS_DIR/$RETRY_PLIST" ]; then
+        return 0
+    fi
+    local installed_version
+    installed_version=$(cat "$INSTALL_DIR/plist-version" 2>/dev/null || echo "0")
+    if [ "$installed_version" = "$PLIST_VERSION" ]; then
+        return 0
+    fi
+    log "LaunchAgent plists outdated (v${installed_version} -> v${PLIST_VERSION}), refreshing..."
+    # Trap SIGTERM: launchctl unload sends SIGTERM to the current process
+    # group when unloading the agent that spawned us; we must survive it
+    # to finish writing new plists and reloading agents.
+    trap '' TERM
+    cmd_enable > /dev/null
+    trap - TERM
+}
+
 cmd_enable() {
     mkdir -p "$LAUNCH_AGENTS_DIR"
 
@@ -660,6 +680,7 @@ EOF
     launchctl load "$LAUNCH_AGENTS_DIR/$RETRY_PLIST"
     launchctl load "$LAUNCH_AGENTS_DIR/$FALLBACK_PLIST"
 
+    printf '%s' "$PLIST_VERSION" > "$INSTALL_DIR/plist-version"
     log "Enabled: boot/watcher/retry/fallback LaunchAgents loaded."
     echo "Done. Boot/Watcher/Retry/Fallback LaunchAgents are now enabled."
 }
@@ -861,6 +882,7 @@ spawn_watcher() {
 
 cmd_run() {
     check_self_update
+    ensure_plists_current
     log "Run triggered."
     reconcile_patch_state "run" || true
 
@@ -871,6 +893,7 @@ cmd_retry() {
     if [ ! -f "$PENDING_FILE" ]; then
         return 0
     fi
+    ensure_plists_current
 
     log "Retry: pending install found."
     NEEDS_PATCH_CHROME_VERSION="$(get_chrome_version_or_unknown)"

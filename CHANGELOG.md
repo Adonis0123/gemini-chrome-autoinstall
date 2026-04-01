@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- Add AbandonProcessGroup to all LaunchAgents and kill watcher on disable([e0b2d0a](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/e0b2d0a8f09fb7be7dbae55cd048887b4de268c7))
+- Guard watcher pid-file reads against TOCTOU race([d020b0d](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/d020b0d90834764ac305a6ef83f71bd20b0807d2))
+- Auto-refresh LaunchAgent plists after self-update([d16b2bc](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/d16b2bc165eb4c1ce028737891f0b900f5f88c28))
+- Prevent plist refresh reentry storm and unblock patch flow([7a7d68b](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/7a7d68b40476e8ecb988d11520b3a8541ed9acb9))
+- Write plist-version after load, use marker to prevent reentry([a921be9](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/a921be96f8cdcf2f9fa08f45c8eeab79b0d3830b))
+## [0.6.0] - 2026-03-30
+
 ### Features
 
 - *(macos)* Add watcher-based retry — spawn background watcher when Chrome is running([df9ab50](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/df9ab501b2573c23ffde81dfb7b2bbb8c58d457f))

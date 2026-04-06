@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- *(windows)* Make watcher detection robust to empty CommandLine([5bced30](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/5bced3026a2bc524a15423b0394362ece834eb18))
+- *(windows)* Validate PID ownership before killing watcher([26bc82d](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/26bc82d411e5fb84c8e3bcb432f46d0b43008e4a))
+- *(windows)* Gate Update-Self watcher kill, fail closed on StartTime errors([9fb0ffd](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/9fb0ffd5ced15e42e101f0401d880dae29b97d29))
+- *(windows)* Identity-match watcher via PID + StartTime.Ticks([00bc52c](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/00bc52c25c1636f6d46e5700631e6d04ca412168))
+- *(windows)* Consolidate watcher identification on $InstallDir([5c3d640](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/5c3d64034d0fd4b4d4bc52a10e94f64fa74d9807))
+## [0.6.1] - 2026-04-01
+
+### Bug Fixes
+
 - Add AbandonProcessGroup to all LaunchAgents and kill watcher on disable([e0b2d0a](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/e0b2d0a8f09fb7be7dbae55cd048887b4de268c7))
 - Guard watcher pid-file reads against TOCTOU race([d020b0d](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/d020b0d90834764ac305a6ef83f71bd20b0807d2))
 - Auto-refresh LaunchAgent plists after self-update([d16b2bc](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/d16b2bc165eb4c1ce028737891f0b900f5f88c28))

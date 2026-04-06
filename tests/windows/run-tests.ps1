@@ -55,7 +55,8 @@ function Invoke-Case {
     "GEMINI_FAKE_INSTALL_MODE",
     "GEMINI_PROFILE_PATH",
     "GEMINI_SKIP_ENABLE",
-    "GEMINI_SKIP_FIRST_PATCH"
+    "GEMINI_SKIP_FIRST_PATCH",
+    "GEMINI_SKIP_SELF_UPDATE"
   )
 
   $originalEnv = @{}
@@ -167,6 +168,12 @@ function Assert-FileMissing {
 
 try {
   New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
+
+  # Keep every test case offline: never call GitHub's raw endpoint for
+  # self-update, and never let Stop-WatchProcess run for real (triggered by
+  # Update-Self). This avoids killing watchers belonging to a production
+  # install on the same machine.
+  $env:GEMINI_SKIP_SELF_UPDATE = "1"
 
   $statusCaseRoot = Join-Path $RunRoot "status-shows-tool-version"
   $statusEnv = @{
@@ -388,6 +395,85 @@ try {
     if (-not $?) { throw "patch.ps1 run failed in verify-failure-recorded" }
     Assert-FileContains (Join-Path $verifyFailureRuntimeRoot "last-result") "status=verify_failed"
   } -CaseEnv $verifyFailureEnv
+
+  # Regression guard for the watcher PID check: Test-WatcherRunning must
+  # recognise a live PowerShell process pointed to by watcher.pid *without*
+  # reading Win32_Process.CommandLine (which can be empty for watchers
+  # launched via wscript.exe / early-session Run-key chains). The test
+  # spawns a dummy PowerShell sleep, writes its PID into watcher.pid, then
+  # asserts that `patch.ps1 status` reports the watcher as RUNNING.
+  $watcherDetectCaseRoot = Join-Path $RunRoot "watcher-detect-accepts-live-pid"
+  $watcherDetectRuntimeRoot = Join-Path $watcherDetectCaseRoot "runtime"
+  $watcherDetectEnv = @{
+    "USERPROFILE" = Join-Path $watcherDetectCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $watcherDetectCaseRoot "localappdata"
+    "TEMP" = Join-Path $watcherDetectCaseRoot "temp"
+    "TMP" = Join-Path $watcherDetectCaseRoot "temp"
+    "TMPDIR" = Join-Path $watcherDetectCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $watcherDetectRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "watcher-detect-accepts-live-pid" {
+    New-Item -ItemType Directory -Force -Path $watcherDetectRuntimeRoot | Out-Null
+    $dummy = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','Start-Sleep -Seconds 120' `
+      -PassThru -WindowStyle Hidden
+    try {
+      $pidFile = Join-Path $watcherDetectRuntimeRoot "watcher.pid"
+      $dummy.Id | Set-Content $pidFile -NoNewline
+      # PID file mtime should be within 60s of process StartTime by design;
+      # both were just created, so the guard accepts them.
+      $statusOutputPath = Join-Path $watcherDetectCaseRoot "status.txt"
+      & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+      if (-not $?) { throw "patch.ps1 status failed in watcher-detect-accepts-live-pid" }
+      $scriptOutput = Get-Content -Path $statusOutputPath -Raw
+      Assert-Contains $scriptOutput "Watcher:      RUNNING (PID $($dummy.Id))"
+    }
+    finally {
+      Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+    }
+  } -CaseEnv $watcherDetectEnv
+
+  # Complements the positive case: when watcher.pid's mtime is much earlier
+  # than the process StartTime, Test-WatcherRunning must reject it because
+  # the PID has likely been reused. Guards against a regression where the
+  # time-window check is dropped or widened.
+  $watcherRejectCaseRoot = Join-Path $RunRoot "watcher-detect-rejects-stale-pidfile"
+  $watcherRejectRuntimeRoot = Join-Path $watcherRejectCaseRoot "runtime"
+  $watcherRejectEnv = @{
+    "USERPROFILE" = Join-Path $watcherRejectCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $watcherRejectCaseRoot "localappdata"
+    "TEMP" = Join-Path $watcherRejectCaseRoot "temp"
+    "TMP" = Join-Path $watcherRejectCaseRoot "temp"
+    "TMPDIR" = Join-Path $watcherRejectCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $watcherRejectRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "watcher-detect-rejects-stale-pidfile" {
+    New-Item -ItemType Directory -Force -Path $watcherRejectRuntimeRoot | Out-Null
+    $dummy = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','Start-Sleep -Seconds 120' `
+      -PassThru -WindowStyle Hidden
+    try {
+      $pidFile = Join-Path $watcherRejectRuntimeRoot "watcher.pid"
+      $dummy.Id | Set-Content $pidFile -NoNewline
+      # Skew pidfile mtime 10 minutes into the past — this simulates a stale
+      # PID file whose PID has been reused by an unrelated PowerShell process.
+      (Get-Item $pidFile).LastWriteTime = $dummy.StartTime.AddMinutes(-10)
+      $statusOutputPath = Join-Path $watcherRejectCaseRoot "status.txt"
+      & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+      if (-not $?) { throw "patch.ps1 status failed in watcher-detect-rejects-stale-pidfile" }
+      $scriptOutput = Get-Content -Path $statusOutputPath -Raw
+      Assert-Contains $scriptOutput "Watcher:      not running"
+    }
+    finally {
+      Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+    }
+  } -CaseEnv $watcherRejectEnv
 
   if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
     Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"

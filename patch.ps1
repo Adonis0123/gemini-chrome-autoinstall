@@ -593,12 +593,34 @@ function Invoke-Enable {
 }
 
 function Stop-WatchProcess {
+    # Primary: kill via PID file. This works even when Win32_Process.CommandLine
+    # is empty for the watcher (e.g. launched via wscript.exe / early session).
+    if (Test-Path $WatcherPidFile) {
+        try {
+            $savedPid = (Get-Content $WatcherPidFile -ErrorAction Stop).Trim()
+            if ($savedPid) {
+                $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+                if ($proc -and -not $proc.HasExited -and $proc.ProcessName -in @('powershell', 'pwsh')) {
+                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                    Write-Log "Stopped watch process via PID file (PID $($proc.Id))."
+                }
+            }
+        } catch {}
+        Remove-Item $WatcherPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # Fallback: scan running PowerShell processes by CommandLine for orphans
+    # without a PID file. Scope the pattern to OUR patch.ps1 absolute path so
+    # we never touch watchers belonging to a sibling install (e.g. a dev repo
+    # running tests must not kill the production install's watcher).
+    $ourPatchPath = Join-Path $PSScriptRoot "patch.ps1"
+    $ourPatchPattern = [regex]::Escape($ourPatchPath) + ".*watch"
     $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
+        Where-Object { $_.CommandLine -match $ourPatchPattern }
     foreach ($proc in $watchProcs) {
         try {
             Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-Log "Stopped watch process (PID $($proc.ProcessId))."
+            Write-Log "Stopped watch process via CommandLine scan (PID $($proc.ProcessId))."
         } catch {}
     }
 }
@@ -691,6 +713,9 @@ function Invoke-Uninstall {
 }
 
 function Update-Self {
+    # Test suites set this to bypass network calls and file overwrites.
+    if ($env:GEMINI_SKIP_SELF_UPDATE -eq "1") { return }
+
     $checkFile = Join-Path $InstallDir "last-update-check"
     $now = [int](Get-Date -UFormat %s)
 
@@ -733,6 +758,13 @@ function Update-Self {
     Move-Item "$tmp\VERSION"      (Join-Path $InstallDir "VERSION")      -Force
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Write-Log "Self-updated from $localVer to $remoteVer"
+
+    # The watcher is a long-lived daemon that loaded the old code into memory.
+    # Without stopping it, the old code keeps running until reboot/crash and
+    # bug fixes in the new version never take effect. Stop it here so the
+    # next Invoke-Scheduled (which runs immediately after this in the same
+    # invocation) spawns a fresh watcher using the new code on disk.
+    Stop-WatchProcess
 }
 
 function Invoke-Run {
@@ -785,9 +817,26 @@ function Test-WatcherRunning {
         if (-not $savedPid) { return $false }
         $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
         if (-not $proc -or $proc.HasExited) { return $false }
-        # Verify the process is actually our watcher (guard against PID reuse)
-        $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$savedPid" -ErrorAction SilentlyContinue
-        if ($wmi -and $wmi.CommandLine -match "patch\.ps1.*watch") { return $true }
+        # Must be a PowerShell process (cheap name check)
+        if ($proc.ProcessName -notin @('powershell', 'pwsh')) { return $false }
+        # Guard against PID reuse without relying on Win32_Process.CommandLine,
+        # which can be empty for processes launched via wscript.exe/WScript.Shell.Run
+        # or during early-session start-up. Instead we verify that the process's
+        # StartTime is close to the PID file's LastWriteTime — Invoke-Watch writes
+        # the PID file immediately after the process starts, so any PID reused by
+        # an unrelated process later would have a start time far in the future of
+        # the PID file's mtime.
+        try {
+            $pidFileTime = (Get-Item $WatcherPidFile -ErrorAction Stop).LastWriteTime
+            $procStart = $proc.StartTime
+            if ([Math]::Abs(($pidFileTime - $procStart).TotalSeconds) -gt 60) {
+                return $false
+            }
+        } catch {
+            # StartTime can throw for protected processes; skip the time check
+            # rather than reject a likely-valid watcher.
+        }
+        return $true
     } catch {}
     return $false
 }
@@ -798,9 +847,14 @@ function Invoke-Watch {
         return
     }
 
+    # Record the version we were started with. If the on-disk VERSION changes
+    # (self-update happened), we self-exit on the next timeout tick so the
+    # next Invoke-Scheduled can spawn a fresh watcher running the new code.
+    $startupVersion = Get-ToolVersion
+
     # Write PID file
     $PID | Set-Content $WatcherPidFile -Force
-    Write-Log "Watch started: monitoring Google Update version changes."
+    Write-Log "Watch started: monitoring Google Update version changes (version $startupVersion)."
 
     $currentVersion = Get-ChromeVersion
     if (-not $currentVersion) {
@@ -933,6 +987,16 @@ public class RegistryWatcher {
                     [void](Invoke-Reconcile -Trigger "watch")
                 }
             } elseif ($waitResult -eq [RegistryWatcher]::WAIT_TIMEOUT) {
+                # Defensive self-exit: if the on-disk tool version changed while
+                # we were sleeping, a self-update happened. Our in-memory code
+                # is now stale, so exit cleanly and let the next Invoke-Scheduled
+                # start a fresh watcher on the new code.
+                $currentVersion = Get-ToolVersion
+                if ($currentVersion -ne $startupVersion) {
+                    Write-Log "Watch: on-disk version changed ($startupVersion -> $currentVersion). Exiting so a fresh watcher can start."
+                    break
+                }
+
                 # Detect Chrome close event (running → not running)
                 $chromeIsRunning = Test-IsChromeRunning
                 if ($chromeWasRunning -and -not $chromeIsRunning) {

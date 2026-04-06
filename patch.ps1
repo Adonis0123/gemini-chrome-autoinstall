@@ -8,7 +8,14 @@ $ErrorActionPreference = "Stop"
 $TaskName = "GeminiChromeAutoPatch"  # legacy: only used for cleanup of old scheduled task
 $RunRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunRegName = "GeminiChromeAutoPatch"
-$ScriptPath = $PSScriptRoot
+# $InstallDir is the single source of truth for where this install's files
+# live — both state (watcher.pid, pending, last-result, …) AND script /
+# binary files (patch.ps1, launcher.vbs, VERSION). Everything in this file
+# that refers to "our install" derives from $InstallDir so that a
+# GEMINI_INSTALL_DIR override operates on ONE consistent install, instead
+# of half-targeting the script's own directory via $PSScriptRoot. The
+# previous split ($PSScriptRoot for script files vs $InstallDir for state)
+# was the root cause of several review rounds on PR #7.
 $InstallDir = if ($env:GEMINI_INSTALL_DIR) { $env:GEMINI_INSTALL_DIR } else { $PSScriptRoot }
 $LogFile = if ($env:GEMINI_LOG_FILE) { $env:GEMINI_LOG_FILE } else { Join-Path $env:LOCALAPPDATA "gemini-chrome-autoinstall.log" }
 $LocalStatePath = if ($env:GEMINI_LOCAL_STATE_PATH) { $env:GEMINI_LOCAL_STATE_PATH } else { "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State" }
@@ -17,7 +24,7 @@ $VersionFile = Join-Path $InstallDir "chrome-version.txt"
 $PendingFile = Join-Path $InstallDir "pending"
 $PatchedVersionFile = Join-Path $InstallDir "patched-version.txt"
 $LastResultFile = Join-Path $InstallDir "last-result"
-$ToolVersionFile = Join-Path $PSScriptRoot "VERSION"
+$ToolVersionFile = Join-Path $InstallDir "VERSION"
 $CoreInstallCommand = $env:GEMINI_CORE_INSTALL_CMD
 $ChromeUpdateSubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
@@ -567,7 +574,7 @@ function Invoke-PendingInstall {
 }
 
 function Invoke-Enable {
-    $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
+    $launcherVbs = Join-Path $InstallDir "launcher.vbs"
     if (-not (Test-Path $launcherVbs)) {
         Write-Log "Error: launcher.vbs not found at $launcherVbs"
         Write-Host "Error: launcher.vbs not found. Please re-run install."
@@ -593,12 +600,68 @@ function Invoke-Enable {
 }
 
 function Stop-WatchProcess {
-    $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
-    foreach ($proc in $watchProcs) {
+    # Primary: kill via PID file, but only after Get-ValidatedWatcherProcess
+    # confirms the PID still unambiguously belongs to our watcher. Without
+    # this guard, a stale watcher.pid combined with Windows PID reuse could
+    # cause us to kill an unrelated PowerShell process (user script, VSCode
+    # integrated terminal, CI agent) the next time Invoke-Disable or
+    # Update-Self calls us.
+    $killedLivePid = $false
+    $proc = Get-ValidatedWatcherProcess
+    if ($proc) {
         try {
-            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-Log "Stopped watch process (PID $($proc.ProcessId))."
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+        } catch {
+            Write-Log "Failed to stop watch process (PID $($proc.Id)): $($_.Exception.Message)"
+        }
+
+        # Give the OS a moment to reap the process then re-check. We only
+        # trust that the kill worked if the process is actually gone —
+        # Stop-Process can fail silently across integrity levels, and if
+        # we remove watcher.pid while the watcher is still alive, status
+        # lies ("not running") and scheduled would spawn a duplicate.
+        $deadline = (Get-Date).AddMilliseconds(1500)
+        while ((Get-Date) -lt $deadline) {
+            $stillAlive = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+            if (-not $stillAlive -or $stillAlive.HasExited) {
+                $killedLivePid = $true
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($killedLivePid) {
+            Write-Log "Stopped watch process via PID file (PID $($proc.Id))."
+        } else {
+            Write-Log "Watch process PID $($proc.Id) survived Stop-Process; leaving watcher.pid intact so status/scheduled still see it."
+            # Bail before the CommandLine fallback too: the scan would
+            # match the same live process and would also fail to kill it.
+            return
+        }
+    }
+
+    # Remove the PID file only when we either:
+    #   * had no valid watcher to begin with (stale or missing file), or
+    #   * confirmed our Stop-Process actually took the watcher down.
+    if (Test-Path $WatcherPidFile) {
+        Remove-Item $WatcherPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # Fallback: scan running PowerShell processes by CommandLine for orphans
+    # without a PID file. Scope the pattern to OUR install dir's patch.ps1
+    # absolute path so we never touch watchers belonging to a sibling
+    # install (e.g. a dev repo running tests must not kill the production
+    # install's watcher). Use $InstallDir, not $PSScriptRoot — the rest of
+    # this script treats $InstallDir as canonical, and install.ps1 spawns
+    # watchers from $InstallDir\launcher.vbs so their CommandLine contains
+    # $InstallDir\patch.ps1.
+    $ourPatchPath = Join-Path $InstallDir "patch.ps1"
+    $ourPatchPattern = [regex]::Escape($ourPatchPath) + ".*watch"
+    $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match $ourPatchPattern }
+    foreach ($fallbackProc in $watchProcs) {
+        try {
+            Stop-Process -Id $fallbackProc.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Log "Stopped watch process via CommandLine scan (PID $($fallbackProc.ProcessId))."
         } catch {}
     }
 }
@@ -630,9 +693,12 @@ function Invoke-Status {
         Write-Host "  Startup:      NOT REGISTERED"
     }
 
-    $watcherPidContent = Get-Content $WatcherPidFile -ErrorAction SilentlyContinue
-    if ($watcherPidContent -and (Test-WatcherRunning)) {
-        Write-Host "  Watcher:      RUNNING (PID $($watcherPidContent.Trim()))"
+    # Use the validated process object for the display so we only ever
+    # print the real PID. Reading watcher.pid directly here would leak the
+    # "<pid> <ticks>" file format into the user-visible status line.
+    $watcherProc = Get-ValidatedWatcherProcess
+    if ($watcherProc) {
+        Write-Host "  Watcher:      RUNNING (PID $($watcherProc.Id))"
     } else {
         Write-Host "  Watcher:      not running"
     }
@@ -691,6 +757,18 @@ function Invoke-Uninstall {
 }
 
 function Update-Self {
+    param(
+        # Set by Invoke-Scheduled, which always starts a fresh watcher
+        # immediately after Update-Self returns. Invoke-Run does NOT pass
+        # this, because it has no follow-up step that would restart the
+        # watcher — killing it from the run path would leave the user with
+        # no background auto-fix until the next login.
+        [switch]$StopWatcherAfterUpdate
+    )
+
+    # Test suites set this to bypass network calls and file overwrites.
+    if ($env:GEMINI_SKIP_SELF_UPDATE -eq "1") { return }
+
     $checkFile = Join-Path $InstallDir "last-update-check"
     $now = [int](Get-Date -UFormat %s)
 
@@ -733,6 +811,18 @@ function Update-Self {
     Move-Item "$tmp\VERSION"      (Join-Path $InstallDir "VERSION")      -Force
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Write-Log "Self-updated from $localVer to $remoteVer"
+
+    # The watcher is a long-lived daemon that loaded the old code into
+    # memory. Without stopping it, the old code keeps running until
+    # reboot/crash and bug fixes in the new version never take effect.
+    # Only do this when the caller guarantees a fresh watcher will be
+    # spawned immediately — Invoke-Scheduled does (see the spawn block
+    # right after its Update-Self call). Invoke-Run does NOT; for that
+    # path we rely on Invoke-Watch's version-mismatch self-exit to let
+    # the old watcher drain itself on its next timeout tick instead.
+    if ($StopWatcherAfterUpdate) {
+        Stop-WatchProcess
+    }
 }
 
 function Invoke-Run {
@@ -778,18 +868,79 @@ function Invoke-Manual {
     }
 }
 
-function Test-WatcherRunning {
-    if (-not (Test-Path $WatcherPidFile)) { return $false }
+function Get-ValidatedWatcherProcess {
+    # Returns the PowerShell Process object that watcher.pid points to *only*
+    # if it is still unambiguously our watcher; returns $null otherwise.
+    #
+    # Shared by Test-WatcherRunning (detection) and Stop-WatchProcess
+    # (termination) so both sites apply the exact same PID-reuse guard. If
+    # this helper drifts, detection and kill would disagree and we'd be back
+    # to the class of bug where Stop-WatchProcess kills an unrelated
+    # PowerShell process whose PID happens to match a stale watcher.pid.
+    #
+    # The guard does NOT rely on Win32_Process.CommandLine — that field can
+    # be empty for watchers launched via wscript.exe / WScript.Shell.Run or
+    # during early-session start-up.
+    #
+    # File format — two forms are recognised:
+    #   1. "<pid> <StartTime.Ticks>"  (current, written by Invoke-Watch)
+    #      Validation is an EXACT ticks match against the live process's
+    #      StartTime. No time window → no PID-reuse collision possible.
+    #   2. "<pid>"                     (legacy, from older installs)
+    #      Validation falls back to a tight ±5s window between the PID
+    #      file's LastWriteTime and the process StartTime. 5s is well
+    #      above normal "process start → Set-Content" latency and well
+    #      below the window where a reused PID could plausibly land on
+    #      a newly-launched powershell.
+    if (-not (Test-Path $WatcherPidFile)) { return $null }
     try {
-        $savedPid = (Get-Content $WatcherPidFile -ErrorAction Stop).Trim()
-        if (-not $savedPid) { return $false }
+        $content = (Get-Content $WatcherPidFile -ErrorAction Stop -Raw)
+        if (-not $content) { return $null }
+        $parts = $content.Trim().Split(' ', 2)
+        $savedPid = $parts[0]
+        if (-not $savedPid) { return $null }
+
+        $savedTicks = $null
+        if ($parts.Count -ge 2 -and $parts[1]) {
+            try { $savedTicks = [long]$parts[1] } catch { $savedTicks = $null }
+        }
+
         $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
-        if (-not $proc -or $proc.HasExited) { return $false }
-        # Verify the process is actually our watcher (guard against PID reuse)
-        $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$savedPid" -ErrorAction SilentlyContinue
-        if ($wmi -and $wmi.CommandLine -match "patch\.ps1.*watch") { return $true }
+        if (-not $proc -or $proc.HasExited) { return $null }
+        if ($proc.ProcessName -notin @('powershell', 'pwsh')) { return $null }
+
+        # Fail-closed on any error reading process StartTime or file mtime:
+        # a false negative just makes the next Invoke-Scheduled spawn a
+        # fresh watcher; a false positive could get Stop-WatchProcess to
+        # kill an unrelated PowerShell we can't introspect.
+        try {
+            $procStart = $proc.StartTime
+        } catch {
+            return $null
+        }
+
+        if ($null -ne $savedTicks) {
+            # New format: exact identity match. PID reuse would land on a
+            # different StartTime, so this can never misidentify.
+            if ($procStart.Ticks -ne $savedTicks) { return $null }
+        } else {
+            # Legacy format: tight mtime window for upgrade compat only.
+            try {
+                $pidFileTime = (Get-Item $WatcherPidFile -ErrorAction Stop).LastWriteTime
+            } catch {
+                return $null
+            }
+            if ([Math]::Abs(($pidFileTime - $procStart).TotalSeconds) -gt 5) {
+                return $null
+            }
+        }
+        return $proc
     } catch {}
-    return $false
+    return $null
+}
+
+function Test-WatcherRunning {
+    return [bool](Get-ValidatedWatcherProcess)
 }
 
 function Invoke-Watch {
@@ -798,9 +949,19 @@ function Invoke-Watch {
         return
     }
 
-    # Write PID file
-    $PID | Set-Content $WatcherPidFile -Force
-    Write-Log "Watch started: monitoring Google Update version changes."
+    # Record the version we were started with. If the on-disk VERSION changes
+    # (self-update happened), we self-exit on the next timeout tick so the
+    # next Invoke-Scheduled can spawn a fresh watcher running the new code.
+    $startupVersion = Get-ToolVersion
+
+    # Write PID file as "<pid> <startTime.Ticks>" so Get-ValidatedWatcherProcess
+    # can do an EXACT identity match against the live process. A reused PID
+    # always has a different StartTime.Ticks, so this eliminates the whole
+    # class of "PID recycled into an unrelated powershell → we kill it" bugs
+    # that a time-window heuristic could never fully close.
+    $selfProc = Get-Process -Id $PID -ErrorAction Stop
+    "$PID $($selfProc.StartTime.Ticks)" | Set-Content $WatcherPidFile -NoNewline -Force
+    Write-Log "Watch started: monitoring Google Update version changes (version $startupVersion)."
 
     $currentVersion = Get-ChromeVersion
     if (-not $currentVersion) {
@@ -933,6 +1094,16 @@ public class RegistryWatcher {
                     [void](Invoke-Reconcile -Trigger "watch")
                 }
             } elseif ($waitResult -eq [RegistryWatcher]::WAIT_TIMEOUT) {
+                # Defensive self-exit: if the on-disk tool version changed while
+                # we were sleeping, a self-update happened. Our in-memory code
+                # is now stale, so exit cleanly and let the next Invoke-Scheduled
+                # start a fresh watcher on the new code.
+                $currentVersion = Get-ToolVersion
+                if ($currentVersion -ne $startupVersion) {
+                    Write-Log "Watch: on-disk version changed ($startupVersion -> $currentVersion). Exiting so a fresh watcher can start."
+                    break
+                }
+
                 # Detect Chrome close event (running → not running)
                 $chromeIsRunning = Test-IsChromeRunning
                 if ($chromeWasRunning -and -not $chromeIsRunning) {
@@ -976,7 +1147,11 @@ public class RegistryWatcher {
 }
 
 function Invoke-Scheduled {
-    Update-Self
+    # Scheduled is the one entry point that both self-updates AND guarantees
+    # a fresh watcher is running afterward, so we pass -StopWatcherAfterUpdate
+    # to let Update-Self tear down the stale in-memory watcher before the
+    # spawn block below brings up a new one on the new code.
+    Update-Self -StopWatcherAfterUpdate
     Write-Log "Scheduled entry triggered."
 
     [void](Invoke-Reconcile -Trigger "startup")
@@ -984,7 +1159,7 @@ function Invoke-Scheduled {
     # Ensure watch process is running
     if (-not (Test-WatcherRunning)) {
         Write-Log "Scheduled: starting watch process in background."
-        $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
+        $launcherVbs = Join-Path $InstallDir "launcher.vbs"
         Start-Process -FilePath "wscript.exe" `
             -ArgumentList "`"$launcherVbs`" watch" `
             -WindowStyle Hidden

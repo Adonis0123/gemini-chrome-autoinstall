@@ -56,7 +56,8 @@ function Invoke-Case {
     "GEMINI_PROFILE_PATH",
     "GEMINI_SKIP_ENABLE",
     "GEMINI_SKIP_FIRST_PATCH",
-    "GEMINI_SKIP_SELF_UPDATE"
+    "GEMINI_SKIP_SELF_UPDATE",
+    "GEMINI_SKIP_WATCHER_START"
   )
 
   $originalEnv = @{}
@@ -169,11 +170,15 @@ function Assert-FileMissing {
 try {
   New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 
-  # Keep every test case offline: never call GitHub's raw endpoint for
-  # self-update, and never let Stop-WatchProcess run for real (triggered by
-  # Update-Self). This avoids killing watchers belonging to a production
-  # install on the same machine.
+  # Keep every test case offline and side-effect-free:
+  #   * GEMINI_SKIP_SELF_UPDATE=1 prevents Update-Self from downloading
+  #     anything from GitHub or triggering Stop-WatchProcess.
+  #   * GEMINI_SKIP_WATCHER_START=1 prevents install.ps1 from spawning a
+  #     background wscript/powershell watcher that would outlive the test
+  #     run and pollute the host (we saw one such orphan in the wild).
+  # Both are registered in $managedKeys so they survive per-case snapshot.
   $env:GEMINI_SKIP_SELF_UPDATE = "1"
+  $env:GEMINI_SKIP_WATCHER_START = "1"
 
   $statusCaseRoot = Join-Path $RunRoot "status-shows-tool-version"
   $statusEnv = @{
@@ -474,6 +479,59 @@ try {
       Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
     }
   } -CaseEnv $watcherRejectEnv
+
+  # Direct regression guard for Stop-WatchProcess: a stale watcher.pid whose
+  # PID has been reused by an unrelated PowerShell process must NOT get
+  # killed. Before this guard, Update-Self / Invoke-Disable would cheerfully
+  # Stop-Process any powershell.exe whose PID happened to match.
+  $stopReuseCaseRoot = Join-Path $RunRoot "stop-watcher-rejects-reused-pid"
+  $stopReuseRuntimeRoot = Join-Path $stopReuseCaseRoot "runtime"
+  $stopReuseEnv = @{
+    "USERPROFILE" = Join-Path $stopReuseCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $stopReuseCaseRoot "localappdata"
+    "TEMP" = Join-Path $stopReuseCaseRoot "temp"
+    "TMP" = Join-Path $stopReuseCaseRoot "temp"
+    "TMPDIR" = Join-Path $stopReuseCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $stopReuseRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "stop-watcher-rejects-reused-pid" {
+    New-Item -ItemType Directory -Force -Path $stopReuseRuntimeRoot | Out-Null
+    # Spawn a long-running PowerShell that stands in for "some unrelated
+    # user script whose PID happens to match our stale watcher.pid".
+    $dummy = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','Start-Sleep -Seconds 120' `
+      -PassThru -WindowStyle Hidden
+    try {
+      $pidFile = Join-Path $stopReuseRuntimeRoot "watcher.pid"
+      $dummy.Id | Set-Content $pidFile -NoNewline
+      (Get-Item $pidFile).LastWriteTime = $dummy.StartTime.AddMinutes(-10)
+
+      # Dot-source patch.ps1 in a child scope (using 'help' so the final
+      # switch is a no-op that touches nothing — no registry, no network,
+      # no Chrome) and then invoke Stop-WatchProcess directly. Running it
+      # through Invoke-Disable would have the side effect of wiping the
+      # real machine's HKCU Run key.
+      & {
+        . "$RepoRoot\patch.ps1" help *> $null
+        Stop-WatchProcess *> $null
+      }
+
+      $stillAlive = Get-Process -Id $dummy.Id -ErrorAction SilentlyContinue
+      if ($stillAlive -and -not $stillAlive.HasExited) {
+        Write-Host "[PASS] Stop-WatchProcess did not kill unrelated PID $($dummy.Id)"
+      } else {
+        Write-Host "[FAIL] Stop-WatchProcess killed unrelated PID $($dummy.Id)"
+        $global:Failures++
+      }
+      Assert-FileMissing $pidFile
+    }
+    finally {
+      Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+    }
+  } -CaseEnv $stopReuseEnv
 
   if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
     Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"

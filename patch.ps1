@@ -593,19 +593,22 @@ function Invoke-Enable {
 }
 
 function Stop-WatchProcess {
-    # Primary: kill via PID file. This works even when Win32_Process.CommandLine
-    # is empty for the watcher (e.g. launched via wscript.exe / early session).
-    if (Test-Path $WatcherPidFile) {
+    # Primary: kill via PID file, but only after Get-ValidatedWatcherProcess
+    # confirms the PID still plausibly belongs to our watcher. Without this
+    # guard, a stale watcher.pid (abnormal exit left it on disk) combined
+    # with Windows PID reuse could cause us to kill an unrelated PowerShell
+    # process — e.g. a user's script, a VSCode integrated terminal, or a CI
+    # agent — the next time Invoke-Disable or Update-Self calls us.
+    $proc = Get-ValidatedWatcherProcess
+    if ($proc) {
         try {
-            $savedPid = (Get-Content $WatcherPidFile -ErrorAction Stop).Trim()
-            if ($savedPid) {
-                $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
-                if ($proc -and -not $proc.HasExited -and $proc.ProcessName -in @('powershell', 'pwsh')) {
-                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                    Write-Log "Stopped watch process via PID file (PID $($proc.Id))."
-                }
-            }
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Write-Log "Stopped watch process via PID file (PID $($proc.Id))."
         } catch {}
+    }
+    # Always remove the PID file if it exists, even if validation rejected
+    # its target — a stale file is no longer authoritative after this point.
+    if (Test-Path $WatcherPidFile) {
         Remove-Item $WatcherPidFile -Force -ErrorAction SilentlyContinue
     }
 
@@ -810,35 +813,47 @@ function Invoke-Manual {
     }
 }
 
-function Test-WatcherRunning {
-    if (-not (Test-Path $WatcherPidFile)) { return $false }
+function Get-ValidatedWatcherProcess {
+    # Returns the PowerShell Process object that watcher.pid points to *only*
+    # if it still plausibly belongs to our watcher; returns $null otherwise.
+    #
+    # Shared by Test-WatcherRunning (detection) and Stop-WatchProcess
+    # (termination) so both sites apply the exact same PID-reuse guard. If
+    # this helper drifts, detection and kill would disagree and we'd be back
+    # to the class of bug where Stop-WatchProcess kills an unrelated
+    # PowerShell process whose PID happens to match a stale watcher.pid
+    # (Windows PID reuse).
+    #
+    # The guard does NOT rely on Win32_Process.CommandLine — that field can
+    # be empty for watchers launched via wscript.exe / WScript.Shell.Run or
+    # during early-session start-up. Instead we compare the process's
+    # StartTime against the PID file's LastWriteTime (±60s); Invoke-Watch
+    # writes the PID file immediately after $PID is assigned, so a reused
+    # PID would have a start time far later than when the file was written.
+    if (-not (Test-Path $WatcherPidFile)) { return $null }
     try {
         $savedPid = (Get-Content $WatcherPidFile -ErrorAction Stop).Trim()
-        if (-not $savedPid) { return $false }
+        if (-not $savedPid) { return $null }
         $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
-        if (-not $proc -or $proc.HasExited) { return $false }
-        # Must be a PowerShell process (cheap name check)
-        if ($proc.ProcessName -notin @('powershell', 'pwsh')) { return $false }
-        # Guard against PID reuse without relying on Win32_Process.CommandLine,
-        # which can be empty for processes launched via wscript.exe/WScript.Shell.Run
-        # or during early-session start-up. Instead we verify that the process's
-        # StartTime is close to the PID file's LastWriteTime — Invoke-Watch writes
-        # the PID file immediately after the process starts, so any PID reused by
-        # an unrelated process later would have a start time far in the future of
-        # the PID file's mtime.
+        if (-not $proc -or $proc.HasExited) { return $null }
+        if ($proc.ProcessName -notin @('powershell', 'pwsh')) { return $null }
         try {
             $pidFileTime = (Get-Item $WatcherPidFile -ErrorAction Stop).LastWriteTime
             $procStart = $proc.StartTime
             if ([Math]::Abs(($pidFileTime - $procStart).TotalSeconds) -gt 60) {
-                return $false
+                return $null
             }
         } catch {
-            # StartTime can throw for protected processes; skip the time check
-            # rather than reject a likely-valid watcher.
+            # StartTime can throw for protected processes; skip the time
+            # check rather than reject a likely-valid watcher.
         }
-        return $true
+        return $proc
     } catch {}
-    return $false
+    return $null
+}
+
+function Test-WatcherRunning {
+    return [bool](Get-ValidatedWatcherProcess)
 }
 
 function Invoke-Watch {

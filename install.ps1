@@ -51,9 +51,15 @@ function Download-OrCopy {
 Write-Host "Installing gemini-chrome-autoinstall..."
 Write-Host ""
 
-# Stop old watcher process before overwriting scripts
+# Stop old watcher process before overwriting scripts. Scope the CommandLine
+# scan to OUR install directory's patch.ps1 — an unscoped scan would kill
+# watchers belonging to sibling installs on the same machine (e.g. test runs
+# or a second install path), which we hit in the field: a dev-repo test run
+# executed this unscoped kill and took out the production install's watcher.
+$ourPatchPath = Join-Path $InstallDir "patch.ps1"
+$ourPatchPattern = [regex]::Escape($ourPatchPath) + ".*watch"
 $oldWatchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match "patch\.ps1.*watch" }
+    Where-Object { $_.CommandLine -match $ourPatchPattern }
 foreach ($proc in $oldWatchProcs) {
     Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
 }
@@ -130,9 +136,10 @@ if ($firstPatchOk) {
     Write-Host "You can also run 'gemini-chrome-fix' manually after closing Chrome."
 }
 Write-Host "Tool version: $((Get-Content (Join-Path $InstallDir 'VERSION') -Raw).Trim())"
-# Start fresh watcher in background
+# Start fresh watcher in background. Test suites set GEMINI_SKIP_WATCHER_START=1
+# so they don't leak a background wscript/powershell process into the system.
 $launcherVbs = Join-Path $InstallDir "launcher.vbs"
-if (Test-Path $launcherVbs) {
+if ($env:GEMINI_SKIP_WATCHER_START -ne "1" -and (Test-Path $launcherVbs)) {
     Start-Process -FilePath "wscript.exe" -ArgumentList "`"$launcherVbs`" watch" -WindowStyle Hidden
     Write-Host "Background watcher started."
 }

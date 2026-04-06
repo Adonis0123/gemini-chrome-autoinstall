@@ -716,6 +716,15 @@ function Invoke-Uninstall {
 }
 
 function Update-Self {
+    param(
+        # Set by Invoke-Scheduled, which always starts a fresh watcher
+        # immediately after Update-Self returns. Invoke-Run does NOT pass
+        # this, because it has no follow-up step that would restart the
+        # watcher — killing it from the run path would leave the user with
+        # no background auto-fix until the next login.
+        [switch]$StopWatcherAfterUpdate
+    )
+
     # Test suites set this to bypass network calls and file overwrites.
     if ($env:GEMINI_SKIP_SELF_UPDATE -eq "1") { return }
 
@@ -762,12 +771,17 @@ function Update-Self {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Write-Log "Self-updated from $localVer to $remoteVer"
 
-    # The watcher is a long-lived daemon that loaded the old code into memory.
-    # Without stopping it, the old code keeps running until reboot/crash and
-    # bug fixes in the new version never take effect. Stop it here so the
-    # next Invoke-Scheduled (which runs immediately after this in the same
-    # invocation) spawns a fresh watcher using the new code on disk.
-    Stop-WatchProcess
+    # The watcher is a long-lived daemon that loaded the old code into
+    # memory. Without stopping it, the old code keeps running until
+    # reboot/crash and bug fixes in the new version never take effect.
+    # Only do this when the caller guarantees a fresh watcher will be
+    # spawned immediately — Invoke-Scheduled does (see the spawn block
+    # right after its Update-Self call). Invoke-Run does NOT; for that
+    # path we rely on Invoke-Watch's version-mismatch self-exit to let
+    # the old watcher drain itself on its next timeout tick instead.
+    if ($StopWatcherAfterUpdate) {
+        Stop-WatchProcess
+    }
 }
 
 function Invoke-Run {
@@ -837,15 +851,20 @@ function Get-ValidatedWatcherProcess {
         $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
         if (-not $proc -or $proc.HasExited) { return $null }
         if ($proc.ProcessName -notin @('powershell', 'pwsh')) { return $null }
+        # Fail-closed on StartTime / mtime errors: if we can't confirm the
+        # time window then we can't rule out PID reuse, and refusing to
+        # confirm is strictly safer than trusting a name-only match.
+        # A false negative here just means the next Invoke-Scheduled will
+        # spawn a fresh watcher; a false positive could mean we kill an
+        # unrelated PowerShell process in Stop-WatchProcess.
         try {
             $pidFileTime = (Get-Item $WatcherPidFile -ErrorAction Stop).LastWriteTime
             $procStart = $proc.StartTime
-            if ([Math]::Abs(($pidFileTime - $procStart).TotalSeconds) -gt 60) {
-                return $null
-            }
         } catch {
-            # StartTime can throw for protected processes; skip the time
-            # check rather than reject a likely-valid watcher.
+            return $null
+        }
+        if ([Math]::Abs(($pidFileTime - $procStart).TotalSeconds) -gt 60) {
+            return $null
         }
         return $proc
     } catch {}
@@ -1055,7 +1074,11 @@ public class RegistryWatcher {
 }
 
 function Invoke-Scheduled {
-    Update-Self
+    # Scheduled is the one entry point that both self-updates AND guarantees
+    # a fresh watcher is running afterward, so we pass -StopWatcherAfterUpdate
+    # to let Update-Self tear down the stale in-memory watcher before the
+    # spawn block below brings up a new one on the new code.
+    Update-Self -StopWatcherAfterUpdate
     Write-Log "Scheduled entry triggered."
 
     [void](Invoke-Reconcile -Trigger "startup")

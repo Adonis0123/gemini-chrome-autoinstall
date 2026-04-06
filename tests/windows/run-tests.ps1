@@ -480,6 +480,83 @@ try {
     }
   } -CaseEnv $watcherRejectEnv
 
+  # New-format watcher.pid ("<pid> <StartTime.Ticks>"): an EXACT Ticks match
+  # on the live process must be accepted as our watcher. The tests above
+  # exercise the legacy (pid-only) compat path; these two exercise the
+  # current format that Invoke-Watch actually writes.
+  $ticksAcceptCaseRoot = Join-Path $RunRoot "watcher-detect-accepts-ticks-match"
+  $ticksAcceptRuntimeRoot = Join-Path $ticksAcceptCaseRoot "runtime"
+  $ticksAcceptEnv = @{
+    "USERPROFILE" = Join-Path $ticksAcceptCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $ticksAcceptCaseRoot "localappdata"
+    "TEMP" = Join-Path $ticksAcceptCaseRoot "temp"
+    "TMP" = Join-Path $ticksAcceptCaseRoot "temp"
+    "TMPDIR" = Join-Path $ticksAcceptCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $ticksAcceptRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "watcher-detect-accepts-ticks-match" {
+    New-Item -ItemType Directory -Force -Path $ticksAcceptRuntimeRoot | Out-Null
+    $dummy = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','Start-Sleep -Seconds 120' `
+      -PassThru -WindowStyle Hidden
+    try {
+      $pidFile = Join-Path $ticksAcceptRuntimeRoot "watcher.pid"
+      # Refresh the process object so StartTime is populated reliably.
+      $proc = Get-Process -Id $dummy.Id
+      "$($proc.Id) $($proc.StartTime.Ticks)" | Set-Content $pidFile -NoNewline
+      $statusOutputPath = Join-Path $ticksAcceptCaseRoot "status.txt"
+      & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+      if (-not $?) { throw "patch.ps1 status failed in watcher-detect-accepts-ticks-match" }
+      $scriptOutput = Get-Content -Path $statusOutputPath -Raw
+      Assert-Contains $scriptOutput "Watcher:      RUNNING (PID $($dummy.Id))"
+    }
+    finally {
+      Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+    }
+  } -CaseEnv $ticksAcceptEnv
+
+  # Rejection side of the new format: a deliberately wrong Ticks value (or
+  # a stale value that doesn't match the live process) must be rejected.
+  # This covers the PID-reuse scenario the legacy time-window heuristic
+  # could not fully close — a reused PID would have a different Ticks.
+  $ticksRejectCaseRoot = Join-Path $RunRoot "watcher-detect-rejects-ticks-mismatch"
+  $ticksRejectRuntimeRoot = Join-Path $ticksRejectCaseRoot "runtime"
+  $ticksRejectEnv = @{
+    "USERPROFILE" = Join-Path $ticksRejectCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $ticksRejectCaseRoot "localappdata"
+    "TEMP" = Join-Path $ticksRejectCaseRoot "temp"
+    "TMP" = Join-Path $ticksRejectCaseRoot "temp"
+    "TMPDIR" = Join-Path $ticksRejectCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $ticksRejectRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "watcher-detect-rejects-ticks-mismatch" {
+    New-Item -ItemType Directory -Force -Path $ticksRejectRuntimeRoot | Out-Null
+    $dummy = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','Start-Sleep -Seconds 120' `
+      -PassThru -WindowStyle Hidden
+    try {
+      $pidFile = Join-Path $ticksRejectRuntimeRoot "watcher.pid"
+      $proc = Get-Process -Id $dummy.Id
+      # Simulate PID reuse: the pidfile records some other Ticks (1h off).
+      $fakeTicks = $proc.StartTime.AddHours(-1).Ticks
+      "$($proc.Id) $fakeTicks" | Set-Content $pidFile -NoNewline
+      $statusOutputPath = Join-Path $ticksRejectCaseRoot "status.txt"
+      & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+      if (-not $?) { throw "patch.ps1 status failed in watcher-detect-rejects-ticks-mismatch" }
+      $scriptOutput = Get-Content -Path $statusOutputPath -Raw
+      Assert-Contains $scriptOutput "Watcher:      not running"
+    }
+    finally {
+      Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+    }
+  } -CaseEnv $ticksRejectEnv
+
   # Direct regression guard for Stop-WatchProcess: a stale watcher.pid whose
   # PID has been reused by an unrelated PowerShell process must NOT get
   # killed. Before this guard, Update-Self / Invoke-Disable would cheerfully

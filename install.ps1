@@ -60,8 +60,31 @@ $ourPatchPath = Join-Path $InstallDir "patch.ps1"
 $ourPatchPattern = [regex]::Escape($ourPatchPath) + ".*watch"
 $oldWatchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match $ourPatchPattern }
+$allOldWatchersDead = $true
 foreach ($proc in $oldWatchProcs) {
-    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    try {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+    } catch {
+        # Will re-check below; Stop-Process can fail silently across
+        # integrity levels.
+    }
+    # Brief drain loop — only trust the kill if the PID actually goes away.
+    $deadline = (Get-Date).AddMilliseconds(1500)
+    $dead = $false
+    while ((Get-Date) -lt $deadline) {
+        $still = Get-Process -Id $proc.ProcessId -ErrorAction SilentlyContinue
+        if (-not $still -or $still.HasExited) { $dead = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $dead) { $allOldWatchersDead = $false }
+}
+
+# Only remove the stale watcher.pid when every old watcher we tried to stop
+# is confirmed dead — otherwise we'd hide a live watcher from the next
+# Test-WatcherRunning / status call and end up with a duplicate daemon.
+$oldPidFile = Join-Path $InstallDir "watcher.pid"
+if ($allOldWatchersDead -and (Test-Path $oldPidFile)) {
+    Remove-Item $oldPidFile -Force -ErrorAction SilentlyContinue
 }
 
 # Clean up stale locks from previous installs

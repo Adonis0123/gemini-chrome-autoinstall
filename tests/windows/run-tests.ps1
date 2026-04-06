@@ -218,6 +218,57 @@ try {
     Assert-PathExists (Join-Path $installRoot "VERSION")
   } -CaseEnv $installEnv
 
+  # Regression guard for install.ps1's old-watcher cleanup: the dummy
+  # PowerShell we spawn here has a CommandLine that does NOT match
+  # "patch.ps1.*watch", so the CommandLine scan on its own would miss
+  # it — exactly the scenario (empty/mismatching CommandLine) that was
+  # the root cause of this whole PR. install.ps1 must fall back to the
+  # PID file primary path to identify and kill it.
+  $installPidKillCaseRoot = Join-Path $RunRoot "install-kills-watcher-via-pidfile"
+  $installPidKillInstallRoot = Join-Path $installPidKillCaseRoot "install"
+  $installPidKillEnv = @{
+    "USERPROFILE" = Join-Path $installPidKillCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $installPidKillCaseRoot "localappdata"
+    "TEMP" = Join-Path $installPidKillCaseRoot "temp"
+    "TMP" = Join-Path $installPidKillCaseRoot "temp"
+    "TMPDIR" = Join-Path $installPidKillCaseRoot "temp"
+  }
+  Invoke-Case "install-kills-watcher-via-pidfile" {
+    New-Item -ItemType Directory -Force -Path $installPidKillInstallRoot | Out-Null
+    $env:GEMINI_INSTALL_DIR = $installPidKillInstallRoot
+    $env:GEMINI_PROFILE_PATH = Join-Path $installPidKillCaseRoot "profile.ps1"
+    $env:GEMINI_SKIP_ENABLE = "1"
+    $env:GEMINI_SKIP_FIRST_PATCH = "1"
+
+    # Dummy PowerShell — stand-in for a live old watcher whose
+    # Win32_Process.CommandLine does not contain "patch.ps1 watch"
+    # (the exact invisibility that wscript.exe launches produce).
+    $dummy = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','Start-Sleep -Seconds 120' `
+      -PassThru -WindowStyle Hidden
+    try {
+      $proc = Get-Process -Id $dummy.Id
+      $pidFile = Join-Path $installPidKillInstallRoot "watcher.pid"
+      "$($proc.Id) $($proc.StartTime.Ticks)" | Set-Content $pidFile -NoNewline
+
+      $installOutputPath = Join-Path $installPidKillCaseRoot "install.txt"
+      & "$RepoRoot\install.ps1" *> $installOutputPath
+      if (-not $?) { throw "install.ps1 failed in install-kills-watcher-via-pidfile" }
+
+      $still = Get-Process -Id $dummy.Id -ErrorAction SilentlyContinue
+      if ($still -and -not $still.HasExited) {
+        Write-Host "[FAIL] install.ps1 did not kill old watcher PID $($dummy.Id) via PID file"
+        $global:Failures++
+      } else {
+        Write-Host "[PASS] install.ps1 killed old watcher PID $($dummy.Id) via PID file"
+      }
+      Assert-FileMissing $pidFile
+    }
+    finally {
+      Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+    }
+  } -CaseEnv $installPidKillEnv
+
   $triCaseRoot = Join-Path $RunRoot "tri-state-healthy"
   $triRuntimeRoot = Join-Path $triCaseRoot "runtime"
   $triEnv = @{

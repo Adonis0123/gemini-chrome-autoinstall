@@ -10,6 +10,59 @@ $SkipEnable = $SkipEnableValue -eq "1"
 $SkipFirstPatch = $SkipFirstPatchValue -eq "1"
 $ProfilePath = if ($env:GEMINI_PROFILE_PATH) { $env:GEMINI_PROFILE_PATH } else { $PROFILE }
 
+function Get-OldValidatedWatcherProcess {
+    # Inline mirror of patch.ps1's Get-ValidatedWatcherProcess. We can't
+    # dot-source the target patch.ps1 because it may be an older version
+    # that doesn't export the function (or doesn't match the current
+    # file format). Any change to watcher.pid format or the validation
+    # logic MUST be made here AND in patch.ps1's Get-ValidatedWatcherProcess.
+    #
+    # Returns the live Process object iff watcher.pid points to a
+    # PowerShell process whose identity is confirmed by either:
+    #   * new format: "<pid> <StartTime.Ticks>" → exact Ticks match
+    #   * legacy format: "<pid>"                → ±5s mtime window
+    param([string]$PidFilePath)
+
+    if (-not (Test-Path $PidFilePath)) { return $null }
+    try {
+        $content = (Get-Content $PidFilePath -Raw -ErrorAction Stop)
+        if (-not $content) { return $null }
+        $parts = $content.Trim().Split(' ', 2)
+        $savedPid = $parts[0]
+        if (-not $savedPid) { return $null }
+
+        $savedTicks = $null
+        if ($parts.Count -ge 2 -and $parts[1]) {
+            try { $savedTicks = [long]$parts[1] } catch { $savedTicks = $null }
+        }
+
+        $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+        if (-not $proc -or $proc.HasExited) { return $null }
+        if ($proc.ProcessName -notin @('powershell', 'pwsh')) { return $null }
+
+        try {
+            $procStart = $proc.StartTime
+        } catch {
+            return $null
+        }
+
+        if ($null -ne $savedTicks) {
+            if ($procStart.Ticks -ne $savedTicks) { return $null }
+        } else {
+            try {
+                $pidFileTime = (Get-Item $PidFilePath -ErrorAction Stop).LastWriteTime
+            } catch {
+                return $null
+            }
+            if ([Math]::Abs(($pidFileTime - $procStart).TotalSeconds) -gt 5) {
+                return $null
+            }
+        }
+        return $proc
+    } catch {}
+    return $null
+}
+
 function Download-OrCopy {
     param(
         [Parameter(Mandatory = $true)][string]$RelativePath,
@@ -51,38 +104,72 @@ function Download-OrCopy {
 Write-Host "Installing gemini-chrome-autoinstall..."
 Write-Host ""
 
-# Stop old watcher process before overwriting scripts. Scope the CommandLine
-# scan to OUR install directory's patch.ps1 — an unscoped scan would kill
-# watchers belonging to sibling installs on the same machine (e.g. test runs
-# or a second install path), which we hit in the field: a dev-repo test run
-# executed this unscoped kill and took out the production install's watcher.
+# Stop old watcher process before overwriting scripts. We must identify
+# watchers by BOTH their PID file AND the CommandLine scan — not just the
+# CommandLine scan — because the whole reason this PR exists is that the
+# watcher spawned by a Run-key → wscript → powershell chain can have an
+# empty Win32_Process.CommandLine, in which case the scan below would
+# silently miss it. Missing it here means the new watcher spawned at the
+# end of install.ps1 would run alongside the still-live old one.
+#
+# Strategy:
+#   1. Primary: read the PID file and validate it the same way
+#      Get-ValidatedWatcherProcess does in patch.ps1 (PID + StartTime.Ticks
+#      exact match, or the legacy ±5s mtime fallback for upgrade compat).
+#      Works even when CommandLine is empty.
+#   2. Fallback: CommandLine scan scoped to $InstallDir\patch.ps1, for
+#      orphans that lost their PID file. Dedup against the primary hit.
+#   3. Kill each target with the same drain-and-verify loop patch.ps1's
+#      Stop-WatchProcess uses.
+#   4. Only remove watcher.pid when EVERY old target is confirmed dead,
+#      so a failed kill doesn't hide a live watcher from the next
+#      Test-WatcherRunning call downstream.
+$oldPidFile = Join-Path $InstallDir "watcher.pid"
+
+$targetsToKill = [System.Collections.Generic.List[object]]::new()
+$pidFileOwner = Get-OldValidatedWatcherProcess -PidFilePath $oldPidFile
+if ($pidFileOwner) {
+    $targetsToKill.Add($pidFileOwner) | Out-Null
+}
+
 $ourPatchPath = Join-Path $InstallDir "patch.ps1"
 $ourPatchPattern = [regex]::Escape($ourPatchPath) + ".*watch"
-$oldWatchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+$scanHits = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match $ourPatchPattern }
-$allOldWatchersDead = $true
-foreach ($proc in $oldWatchProcs) {
-    try {
-        Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
-    } catch {
-        # Will re-check below; Stop-Process can fail silently across
-        # integrity levels.
+foreach ($hit in $scanHits) {
+    $alreadyTracked = $false
+    foreach ($existing in $targetsToKill) {
+        if ($existing.Id -eq $hit.ProcessId) { $alreadyTracked = $true; break }
     }
-    # Brief drain loop — only trust the kill if the PID actually goes away.
+    if (-not $alreadyTracked) {
+        $fallbackProc = Get-Process -Id $hit.ProcessId -ErrorAction SilentlyContinue
+        if ($fallbackProc -and -not $fallbackProc.HasExited) {
+            $targetsToKill.Add($fallbackProc) | Out-Null
+        }
+    }
+}
+
+$allOldWatchersDead = $true
+foreach ($target in $targetsToKill) {
+    try {
+        Stop-Process -Id $target.Id -Force -ErrorAction Stop
+    } catch {
+        # Re-checked by the drain loop; Stop-Process can fail silently
+        # across integrity levels.
+    }
     $deadline = (Get-Date).AddMilliseconds(1500)
     $dead = $false
     while ((Get-Date) -lt $deadline) {
-        $still = Get-Process -Id $proc.ProcessId -ErrorAction SilentlyContinue
+        $still = Get-Process -Id $target.Id -ErrorAction SilentlyContinue
         if (-not $still -or $still.HasExited) { $dead = $true; break }
         Start-Sleep -Milliseconds 100
     }
     if (-not $dead) { $allOldWatchersDead = $false }
 }
 
-# Only remove the stale watcher.pid when every old watcher we tried to stop
-# is confirmed dead — otherwise we'd hide a live watcher from the next
-# Test-WatcherRunning / status call and end up with a duplicate daemon.
-$oldPidFile = Join-Path $InstallDir "watcher.pid"
+# Remove the stale PID file only when every old target is confirmed dead.
+# If any one survived, keep the file so the next detection round still
+# sees the live watcher.
 if ($allOldWatchersDead -and (Test-Path $oldPidFile)) {
     Remove-Item $oldPidFile -Force -ErrorAction SilentlyContinue
 }

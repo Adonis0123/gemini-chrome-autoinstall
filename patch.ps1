@@ -8,7 +8,14 @@ $ErrorActionPreference = "Stop"
 $TaskName = "GeminiChromeAutoPatch"  # legacy: only used for cleanup of old scheduled task
 $RunRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunRegName = "GeminiChromeAutoPatch"
-$ScriptPath = $PSScriptRoot
+# $InstallDir is the single source of truth for where this install's files
+# live — both state (watcher.pid, pending, last-result, …) AND script /
+# binary files (patch.ps1, launcher.vbs, VERSION). Everything in this file
+# that refers to "our install" derives from $InstallDir so that a
+# GEMINI_INSTALL_DIR override operates on ONE consistent install, instead
+# of half-targeting the script's own directory via $PSScriptRoot. The
+# previous split ($PSScriptRoot for script files vs $InstallDir for state)
+# was the root cause of several review rounds on PR #7.
 $InstallDir = if ($env:GEMINI_INSTALL_DIR) { $env:GEMINI_INSTALL_DIR } else { $PSScriptRoot }
 $LogFile = if ($env:GEMINI_LOG_FILE) { $env:GEMINI_LOG_FILE } else { Join-Path $env:LOCALAPPDATA "gemini-chrome-autoinstall.log" }
 $LocalStatePath = if ($env:GEMINI_LOCAL_STATE_PATH) { $env:GEMINI_LOCAL_STATE_PATH } else { "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State" }
@@ -17,7 +24,7 @@ $VersionFile = Join-Path $InstallDir "chrome-version.txt"
 $PendingFile = Join-Path $InstallDir "pending"
 $PatchedVersionFile = Join-Path $InstallDir "patched-version.txt"
 $LastResultFile = Join-Path $InstallDir "last-result"
-$ToolVersionFile = Join-Path $PSScriptRoot "VERSION"
+$ToolVersionFile = Join-Path $InstallDir "VERSION"
 $CoreInstallCommand = $env:GEMINI_CORE_INSTALL_CMD
 $ChromeUpdateSubKey = "Software\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
 $ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463C-AFF1-A69D9E530F96}"
@@ -567,7 +574,7 @@ function Invoke-PendingInstall {
 }
 
 function Invoke-Enable {
-    $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
+    $launcherVbs = Join-Path $InstallDir "launcher.vbs"
     if (-not (Test-Path $launcherVbs)) {
         Write-Log "Error: launcher.vbs not found at $launcherVbs"
         Write-Host "Error: launcher.vbs not found. Please re-run install."
@@ -640,10 +647,14 @@ function Stop-WatchProcess {
     }
 
     # Fallback: scan running PowerShell processes by CommandLine for orphans
-    # without a PID file. Scope the pattern to OUR patch.ps1 absolute path so
-    # we never touch watchers belonging to a sibling install (e.g. a dev repo
-    # running tests must not kill the production install's watcher).
-    $ourPatchPath = Join-Path $PSScriptRoot "patch.ps1"
+    # without a PID file. Scope the pattern to OUR install dir's patch.ps1
+    # absolute path so we never touch watchers belonging to a sibling
+    # install (e.g. a dev repo running tests must not kill the production
+    # install's watcher). Use $InstallDir, not $PSScriptRoot — the rest of
+    # this script treats $InstallDir as canonical, and install.ps1 spawns
+    # watchers from $InstallDir\launcher.vbs so their CommandLine contains
+    # $InstallDir\patch.ps1.
+    $ourPatchPath = Join-Path $InstallDir "patch.ps1"
     $ourPatchPattern = [regex]::Escape($ourPatchPath) + ".*watch"
     $watchProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match $ourPatchPattern }
@@ -1148,7 +1159,7 @@ function Invoke-Scheduled {
     # Ensure watch process is running
     if (-not (Test-WatcherRunning)) {
         Write-Log "Scheduled: starting watch process in background."
-        $launcherVbs = Join-Path $ScriptPath "launcher.vbs"
+        $launcherVbs = Join-Path $InstallDir "launcher.vbs"
         Start-Process -FilePath "wscript.exe" `
             -ArgumentList "`"$launcherVbs`" watch" `
             -WindowStyle Hidden

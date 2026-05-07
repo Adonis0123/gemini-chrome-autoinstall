@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- *(windows)* Dispose chrome process checks([cbbfd11](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/cbbfd11666c7dd40cfe0c4724c457969c39757e4))
+## [0.6.2] - 2026-04-06
+
+### Bug Fixes
+
 - *(windows)* Make watcher detection robust to empty CommandLine([5bced30](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/5bced3026a2bc524a15423b0394362ece834eb18))
 - *(windows)* Validate PID ownership before killing watcher([26bc82d](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/26bc82d411e5fb84c8e3bcb432f46d0b43008e4a))
 - *(windows)* Gate Update-Self watcher kill, fail closed on StartTime errors([9fb0ffd](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/9fb0ffd5ced15e42e101f0401d880dae29b97d29))

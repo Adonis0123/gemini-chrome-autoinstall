@@ -410,12 +410,29 @@ function Resolve-StateMapping {
     }
 }
 
+function Get-ChromeProcesses {
+    return [System.Diagnostics.Process]::GetProcessesByName("chrome")
+}
+
 function Test-IsChromeRunning {
     if ($env:GEMINI_CHROME_RUNNING) {
         return $env:GEMINI_CHROME_RUNNING -eq "1"
     }
 
-    return [bool](Get-Process chrome -ErrorAction SilentlyContinue)
+    $processes = @()
+    try {
+        $processes = @(Get-ChromeProcesses)
+        return $processes.Count -gt 0
+    } catch {
+        Write-Log "Chrome process check failed; assuming Chrome is running: $($_.Exception.Message)"
+        return $true
+    } finally {
+        foreach ($proc in $processes) {
+            if ($null -ne $proc -and $proc -is [System.IDisposable]) {
+                $proc.Dispose()
+            }
+        }
+    }
 }
 
 function Save-ChromeVersion {

@@ -269,6 +269,61 @@ try {
     }
   } -CaseEnv $installPidKillEnv
 
+  $chromeDisposeCaseRoot = Join-Path $RunRoot "chrome-running-check-disposes-process-objects"
+  $chromeDisposeRuntimeRoot = Join-Path $chromeDisposeCaseRoot "runtime"
+  $chromeDisposeEnv = @{
+    "USERPROFILE" = Join-Path $chromeDisposeCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $chromeDisposeCaseRoot "localappdata"
+    "TEMP" = Join-Path $chromeDisposeCaseRoot "temp"
+    "TMP" = Join-Path $chromeDisposeCaseRoot "temp"
+    "TMPDIR" = Join-Path $chromeDisposeCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $chromeDisposeRuntimeRoot
+  }
+  Invoke-Case "chrome-running-check-disposes-process-objects" {
+    New-Item -ItemType Directory -Force -Path $chromeDisposeRuntimeRoot | Out-Null
+    & {
+      . "$RepoRoot\patch.ps1" help *> $null
+
+      if (-not ("GeminiChromeProcessProbe" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+
+public sealed class GeminiChromeProcessProbe : IDisposable
+{
+    public static int DisposeCount = 0;
+
+    public void Dispose()
+    {
+        DisposeCount++;
+    }
+}
+"@
+      }
+
+      [GeminiChromeProcessProbe]::DisposeCount = 0
+      function Get-ChromeProcesses {
+        return @(
+          (New-Object GeminiChromeProcessProbe),
+          (New-Object GeminiChromeProcessProbe),
+          (New-Object GeminiChromeProcessProbe)
+        )
+      }
+
+      $isRunning = Test-IsChromeRunning
+      if (-not $isRunning) {
+        Write-Host "[FAIL] Test-IsChromeRunning did not report mocked Chrome processes"
+        $global:Failures++
+      }
+      elseif ([GeminiChromeProcessProbe]::DisposeCount -ne 3) {
+        Write-Host "[FAIL] Test-IsChromeRunning disposed $([GeminiChromeProcessProbe]::DisposeCount) mocked Chrome process objects; expected 3"
+        $global:Failures++
+      }
+      else {
+        Write-Host "[PASS] Test-IsChromeRunning disposes Chrome process objects"
+      }
+    }
+  } -CaseEnv $chromeDisposeEnv
+
   $triCaseRoot = Join-Path $RunRoot "tri-state-healthy"
   $triRuntimeRoot = Join-Path $triCaseRoot "runtime"
   $triEnv = @{

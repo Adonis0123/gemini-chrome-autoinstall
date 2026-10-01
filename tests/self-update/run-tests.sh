@@ -121,7 +121,7 @@ echo ""
 # --- Test 2: Version identical ---
 echo "Test 2: Version identical"
 reset_install_dir
-cp "$PROJECT_ROOT/VERSION" "$TEST_INSTALL_DIR/VERSION"
+cp "$FIXTURES/same/VERSION" "$TEST_INSTALL_DIR/VERSION"
 rm -f "$TEST_INSTALL_DIR/last-update-check"
 start_server "$FIXTURES/same"
 run_patch

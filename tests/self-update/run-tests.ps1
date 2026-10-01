@@ -125,7 +125,7 @@ Write-Host ""
 # --- Test 2: Version identical ---
 Write-Host "Test 2: Version identical"
 Reset-InstallDir
-Copy-Item (Join-Path $ProjectRoot "VERSION") (Join-Path $TestInstallDir "VERSION")
+Copy-Item (Join-Path $Fixtures "same\VERSION") (Join-Path $TestInstallDir "VERSION")
 Remove-Item (Join-Path $TestInstallDir "last-update-check") -ErrorAction SilentlyContinue
 Start-FixtureServer (Join-Path $Fixtures "same")
 Invoke-PatchRun

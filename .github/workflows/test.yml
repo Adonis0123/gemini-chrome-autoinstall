@@ -28,3 +28,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/windows/run-tests.ps1
+
+      - name: Run macOS self-update tests
+        if: runner.os == 'macOS'
+        run: bash tests/self-update/run-tests.sh
+
+      - name: Run Windows self-update tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/self-update/run-tests.ps1

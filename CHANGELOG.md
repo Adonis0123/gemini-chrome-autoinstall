@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Patch variations seed country for Chrome 153+([3661ea0](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/3661ea0bba18d2e803061bd2bc5741f17eef65e4))
+## [0.6.3] - 2026-05-07
+
+### Bug Fixes
+
 - *(windows)* Dispose chrome process checks([cbbfd11](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/cbbfd11666c7dd40cfe0c4724c457969c39757e4))
 ## [0.6.2] - 2026-04-06
 

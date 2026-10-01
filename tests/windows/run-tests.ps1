@@ -57,7 +57,8 @@ function Invoke-Case {
     "GEMINI_SKIP_ENABLE",
     "GEMINI_SKIP_FIRST_PATCH",
     "GEMINI_SKIP_SELF_UPDATE",
-    "GEMINI_SKIP_WATCHER_START"
+    "GEMINI_SKIP_WATCHER_START",
+    "GEMINI_ZSTD_PATH"
   )
 
   $originalEnv = @{}
@@ -715,6 +716,100 @@ public sealed class GeminiChromeProcessProbe : IDisposable
       Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
     }
   } -CaseEnv $stopReuseEnv
+
+  # Minimal Chrome stored-seed record: field 6 = session country, field 7 = permanent country.
+  function New-SeedRecord {
+    param([string]$Session, [string]$Permanent)
+    $ascii = [System.Text.Encoding]::ASCII
+    [byte[]]$record = @(0x0A, 4) + $ascii.GetBytes("seed") +
+      @(0x18, 0x99, 0x01) +  # varint 153 (multi-byte), exercises wire type 0
+      @(0x32, 2) + $ascii.GetBytes($Session) +
+      @(0x3A, 2) + $ascii.GetBytes($Permanent)
+    return , $record
+  }
+
+  function Get-SeedRecordCountries {
+    param([string]$Path)
+    $data = [System.IO.File]::ReadAllBytes($Path)
+    $text = [System.Text.Encoding]::ASCII.GetString($data)
+    return "$($text.Substring(11, 2)),$($text.Substring(15, 2))"
+  }
+
+  $seedStatusCaseRoot = Join-Path $RunRoot "status-drifted-variations-seed-country"
+  $seedStatusUserData = Join-Path $seedStatusCaseRoot "userdata"
+  $seedStatusEnv = @{
+    "USERPROFILE" = Join-Path $seedStatusCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $seedStatusCaseRoot "localappdata"
+    "TEMP" = Join-Path $seedStatusCaseRoot "temp"
+    "TMP" = Join-Path $seedStatusCaseRoot "temp"
+    "TMPDIR" = Join-Path $seedStatusCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = Join-Path $seedStatusCaseRoot "runtime"
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $seedStatusUserData "Local State"
+    "GEMINI_CHROME_VERSION" = "153.0.8010.53"
+    "GEMINI_CHROME_RUNNING" = "1"
+  }
+  Invoke-Case "status-drifted-variations-seed-country" {
+    New-Item -ItemType Directory -Force -Path $seedStatusUserData | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy.json") (Join-Path $seedStatusUserData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $seedStatusUserData "VariationsSeedV2"), (New-SeedRecord -Session "cn" -Permanent "cn"))
+    $statusOutputPath = Join-Path $seedStatusCaseRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed in status-drifted-variations-seed-country" }
+    Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: drifted"
+  } -CaseEnv $seedStatusEnv
+
+  $seedPatchCaseRoot = Join-Path $RunRoot "run-patches-variations-seed-country"
+  $seedPatchRuntimeRoot = Join-Path $seedPatchCaseRoot "runtime"
+  $seedPatchUserData = Join-Path $seedPatchCaseRoot "userdata"
+  $seedPatchEnv = @{
+    "USERPROFILE" = Join-Path $seedPatchCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $seedPatchCaseRoot "localappdata"
+    "TEMP" = Join-Path $seedPatchCaseRoot "temp"
+    "TMP" = Join-Path $seedPatchCaseRoot "temp"
+    "TMPDIR" = Join-Path $seedPatchCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $seedPatchRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $seedPatchUserData "Local State"
+    "GEMINI_CORE_INSTALL_CMD" = "$RepoRoot\tests\helpers\fake-core-install.ps1"
+    "GEMINI_FAKE_INSTALL_MODE" = "success"
+    "GEMINI_CHROME_VERSION" = "153.0.8010.53"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "run-patches-variations-seed-country" {
+    New-Item -ItemType Directory -Force -Path $seedPatchRuntimeRoot, $seedPatchUserData | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy.json") (Join-Path $seedPatchUserData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $seedPatchUserData "VariationsSeedV2"), (New-SeedRecord -Session "cn" -Permanent "cn"))
+    [System.IO.File]::WriteAllBytes((Join-Path $seedPatchUserData "VariationsSafeSeedV2"), (New-SeedRecord -Session "cn" -Permanent "us"))
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in run-patches-variations-seed-country" }
+    Assert-FileContains (Join-Path $seedPatchRuntimeRoot "last-result") "status=healthy"
+    Assert-Contains (Get-SeedRecordCountries (Join-Path $seedPatchUserData "VariationsSeedV2")) "us,us"
+    Assert-Contains (Get-SeedRecordCountries (Join-Path $seedPatchUserData "VariationsSafeSeedV2")) "us,us"
+    Assert-Contains (Get-SeedRecordCountries (Join-Path $seedPatchUserData "VariationsSeedV2.bak")) "cn,cn"
+  } -CaseEnv $seedPatchEnv
+
+  $seedNoZstdCaseRoot = Join-Path $RunRoot "status-unknown-when-zstd-unavailable"
+  $seedNoZstdUserData = Join-Path $seedNoZstdCaseRoot "userdata"
+  $seedNoZstdEnv = @{
+    "USERPROFILE" = Join-Path $seedNoZstdCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $seedNoZstdCaseRoot "localappdata"
+    "TEMP" = Join-Path $seedNoZstdCaseRoot "temp"
+    "TMP" = Join-Path $seedNoZstdCaseRoot "temp"
+    "TMPDIR" = Join-Path $seedNoZstdCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = Join-Path $seedNoZstdCaseRoot "runtime"
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $seedNoZstdUserData "Local State"
+    "GEMINI_CHROME_VERSION" = "153.0.8010.53"
+    "GEMINI_CHROME_RUNNING" = "1"
+    "GEMINI_ZSTD_PATH" = Join-Path $seedNoZstdCaseRoot "missing-zstd.exe"
+  }
+  Invoke-Case "status-unknown-when-zstd-unavailable" {
+    New-Item -ItemType Directory -Force -Path $seedNoZstdUserData | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy.json") (Join-Path $seedNoZstdUserData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $seedNoZstdUserData "VariationsSeedV2"), [byte[]](0x28, 0xB5, 0x2F, 0xFD, 0x00))
+    $statusOutputPath = Join-Path $seedNoZstdCaseRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed in status-unknown-when-zstd-unavailable" }
+    Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: unknown"
+  } -CaseEnv $seedNoZstdEnv
 
   if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
     Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"

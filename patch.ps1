@@ -19,6 +19,12 @@ $RunRegName = "GeminiChromeAutoPatch"
 $InstallDir = if ($env:GEMINI_INSTALL_DIR) { $env:GEMINI_INSTALL_DIR } else { $PSScriptRoot }
 $LogFile = if ($env:GEMINI_LOG_FILE) { $env:GEMINI_LOG_FILE } else { Join-Path $env:LOCALAPPDATA "gemini-chrome-autoinstall.log" }
 $LocalStatePath = if ($env:GEMINI_LOCAL_STATE_PATH) { $env:GEMINI_LOCAL_STATE_PATH } else { "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State" }
+$ChromeUserDataDir = Split-Path -Path $LocalStatePath -Parent
+# Chrome 153+ keeps the session/permanent consistency country in these zstd-compressed
+# protobuf files and no longer honors the Local State copies the core install patches.
+$VariationsSeedFiles = @("VariationsSeedV2", "VariationsSafeSeedV2")
+$ZstdDownloadUrl = "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip"
+$ZstdDownloadSha256 = "ACB4E8111511749DC7A3EBEDCA9B04190E37A17AFEB73F55D4425DBF0B90FAD9"
 $ActiveLockDir = Join-Path $env:TEMP "gemini-chrome-autoinstall.active.lock"
 $VersionFile = Join-Path $InstallDir "chrome-version.txt"
 $PendingFile = Join-Path $InstallDir "pending"
@@ -318,6 +324,158 @@ function Get-LocalStateVersion {
     }
 }
 
+function Get-ZstdPath {
+    # Test suites point this at a stub (or a missing path) to avoid downloads.
+    if ($env:GEMINI_ZSTD_PATH) {
+        if (Test-Path -LiteralPath $env:GEMINI_ZSTD_PATH) { return $env:GEMINI_ZSTD_PATH }
+        return $null
+    }
+
+    $onPath = Get-Command zstd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Path }
+
+    $bundled = Join-Path $InstallDir "bin\zstd.exe"
+    if (Test-Path -LiteralPath $bundled) { return $bundled }
+
+    $tmp = Join-Path $env:TEMP "gemini-zstd-download"
+    try {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $zip = Join-Path $tmp "zstd.zip"
+        Invoke-WebRequest -Uri $ZstdDownloadUrl -OutFile $zip -TimeoutSec 30 -UseBasicParsing
+        $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+        if ($hash -ne $ZstdDownloadSha256) {
+            Write-Log "zstd download rejected: SHA256 mismatch ($hash)."
+            return $null
+        }
+        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        $exe = Get-ChildItem -Path $tmp -Recurse -Filter "zstd.exe" | Select-Object -First 1
+        if (-not $exe) {
+            Write-Log "zstd download failed: zstd.exe not found in archive."
+            return $null
+        }
+        New-Item -ItemType Directory -Path (Split-Path $bundled -Parent) -Force | Out-Null
+        Copy-Item -Path $exe.FullName -Destination $bundled -Force
+        Write-Log "Downloaded zstd to $bundled."
+        return $bundled
+    }
+    catch {
+        Write-Log "zstd download failed: $_"
+        return $null
+    }
+    finally {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-Zstd {
+    param([string]$ZstdPath, [byte[]]$Data, [switch]$Decompress)
+    $inFile = [System.IO.Path]::GetTempFileName()
+    $outFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllBytes($inFile, $Data)
+        if ($Decompress) {
+            & $ZstdPath -d -q -f -o $outFile $inFile | Out-Null
+        }
+        else {
+            & $ZstdPath -q -f -o $outFile $inFile | Out-Null
+        }
+        if ($LASTEXITCODE -ne 0) { throw "zstd exited with code $LASTEXITCODE" }
+        return , [System.IO.File]::ReadAllBytes($outFile)
+    }
+    finally {
+        Remove-Item $inFile, $outFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-SeedCountrySpans {
+    # Walks the top-level fields of Chrome's stored seed record and returns the
+    # offsets of the 2-byte country strings: 6 = session country, 7 = permanent country.
+    param([byte[]]$Data)
+    $spans = @()
+    $i = 0
+    while ($i -lt $Data.Length) {
+        $key = 0L; $shift = 0
+        do { $b = $Data[$i]; $i++; $key = $key -bor ([long]($b -band 0x7F) -shl $shift); $shift += 7 } while ($b -ge 0x80)
+        $field = $key -shr 3
+        $wire = $key -band 7
+        switch ($wire) {
+            0 { do { $b = $Data[$i]; $i++ } while ($b -ge 0x80) }
+            1 { $i += 8 }
+            2 {
+                $length = 0L; $shift = 0
+                do { $b = $Data[$i]; $i++; $length = $length -bor ([long]($b -band 0x7F) -shl $shift); $shift += 7 } while ($b -ge 0x80)
+                if (($field -eq 6 -or $field -eq 7) -and $length -eq 2) {
+                    $spans += [pscustomobject]@{ Offset = $i; Country = [System.Text.Encoding]::ASCII.GetString($Data, $i, 2) }
+                }
+                $i += [int]$length
+            }
+            5 { $i += 4 }
+            default { throw "bad_wire_type" }
+        }
+    }
+    return $spans
+}
+
+function Update-VariationsSeedCountry {
+    # -Mode check returns state none|ok|drifted|error; -Mode patch returns none|patched|error.
+    param([ValidateSet("check", "patch")][string]$Mode)
+
+    $paths = @($VariationsSeedFiles | ForEach-Object { Join-Path $ChromeUserDataDir $_ } | Where-Object { Test-Path -LiteralPath $_ })
+    if ($paths.Count -eq 0) { return @{ state = "none"; value = "" } }
+
+    $zstdPath = $null
+    $patched = 0
+    try {
+        foreach ($path in $paths) {
+            $raw = [System.IO.File]::ReadAllBytes($path)
+            $compressed = $raw.Length -ge 4 -and $raw[0] -eq 0x28 -and $raw[1] -eq 0xB5 -and $raw[2] -eq 0x2F -and $raw[3] -eq 0xFD
+            [byte[]]$payload = $raw
+            if ($compressed) {
+                if (-not $zstdPath) { $zstdPath = Get-ZstdPath }
+                if (-not $zstdPath) { return @{ state = "error"; value = "seed_zstd_unavailable" } }
+                $payload = Invoke-Zstd -ZstdPath $zstdPath -Data $raw -Decompress
+            }
+
+            $spans = @(Get-SeedCountrySpans -Data $payload | Where-Object { $_.Country -ne "us" })
+            if ($spans.Count -eq 0) { continue }
+            if ($Mode -eq "check") { return @{ state = "drifted"; value = $spans[0].Country } }
+
+            foreach ($span in $spans) {
+                $payload[$span.Offset] = [byte][char]'u'
+                $payload[$span.Offset + 1] = [byte][char]'s'
+            }
+            [byte[]]$output = $payload
+            if ($compressed) {
+                $output = Invoke-Zstd -ZstdPath $zstdPath -Data $payload
+            }
+            Copy-Item -LiteralPath $path -Destination "$path.bak" -Force
+            $tmpPath = "$path.tmp"
+            [System.IO.File]::WriteAllBytes($tmpPath, $output)
+            Move-Item -LiteralPath $tmpPath -Destination $path -Force
+            $patched++
+        }
+    }
+    catch {
+        return @{ state = "error"; value = "seed_unreadable" }
+    }
+
+    if ($Mode -eq "check") { return @{ state = "ok"; value = "" } }
+    return @{ state = "patched"; value = $patched }
+}
+
+function Invoke-VariationsSeedPatch {
+    $result = Update-VariationsSeedCountry -Mode patch
+    if ($result.state -eq "error") {
+        Write-Log "Variations seed patch failed: $($result.value). Install zstd (winget install Meta.Zstandard) and retry."
+        return $false
+    }
+    if ($result.state -eq "patched" -and $result.value -gt 0) {
+        Write-Log "Variations seed country set to us ($($result.value) file(s))."
+    }
+    return $true
+}
+
 function Get-PatchState {
     if (-not (Test-Path $LocalStatePath)) {
         return @{ state = "unknown"; reason = "local_state_missing" }
@@ -374,6 +532,14 @@ function Get-PatchState {
 
     if ($hasGlicFalse) {
         return @{ state = "drifted"; reason = "glic_not_eligible" }
+    }
+
+    $seed = Update-VariationsSeedCountry -Mode check
+    if ($seed.state -eq "drifted") {
+        return @{ state = "drifted"; reason = "variations_seed_country=$($seed.value)" }
+    }
+    if ($seed.state -eq "error") {
+        return @{ state = "unknown"; reason = $seed.value }
     }
 
     return @{ state = "healthy"; reason = "ok" }
@@ -504,7 +670,7 @@ function Invoke-PatchAndVerify {
     }
 
     try {
-        if (-not (Invoke-CoreInstall)) {
+        if (-not (Invoke-CoreInstall) -or -not (Invoke-VariationsSeedPatch)) {
             Upsert-PendingRecord -Reason "patch_failed" -PatchReason $PatchReason
             Write-LastResult -Status "patch_failed" -Reason $PatchReason -ChromeVersion $chromeVersion -Hint "Run gemini-chrome-fix"
             return $false

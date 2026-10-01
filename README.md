@@ -64,6 +64,13 @@ Add-Content $PROFILE "function gemini-chrome-status { & `"`$env:USERPROFILE\.gem
 
 The tool treats `Local State` as the source of truth.
 
+Chrome 153+ also stores the variations country in `VariationsSeedV2` / `VariationsSafeSeedV2` (zstd-compressed) and ignores the `Local State` copy. After each install the tool rewrites that country to `us`:
+
+- macOS: needs the `zstd` CLI (`brew install zstd`) or Python 3.14+.
+- Windows: uses `zstd` from `PATH`, otherwise downloads the official `zstd-v1.5.7-win64.zip` from the facebook/zstd GitHub release, checks a pinned SHA256, and keeps `zstd.exe` in `<install dir>\bin`.
+
+If zstd is unavailable, `status` reports `unknown` with reason `seed_zstd_unavailable`.
+
 - `healthy`: required fields already match the expected Gemini-in-Chrome state
 - `drifted`: Chrome state has moved away from the expected patched values
 - `unknown`: the tool cannot prove health because the file is missing, malformed, or missing required fields

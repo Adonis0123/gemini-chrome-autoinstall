@@ -19,6 +19,10 @@ ACTIVE_LOCK_DIR="/tmp/gemini-chrome-autoinstall.active.lock"
 WATCHER_PID_FILE="$INSTALL_DIR/watcher.pid"
 LOG_FILE="${GEMINI_LOG_FILE:-$HOME/Library/Logs/gemini-chrome-autoinstall.log}"
 LOCAL_STATE_FILE="${GEMINI_LOCAL_STATE_PATH:-$HOME/Library/Application Support/Google/Chrome/Local State}"
+CHROME_USER_DATA_DIR="$(dirname "$LOCAL_STATE_FILE")"
+# Chrome 153+ keeps the session/permanent consistency country in these zstd-compressed
+# protobuf files and no longer honors the Local State copies the core install patches.
+VARIATIONS_SEED_FILES=("VariationsSeedV2" "VariationsSafeSeedV2")
 TOOL_VERSION_FILE="${SCRIPT_DIR}/VERSION"
 CORE_INSTALL_CMD="${GEMINI_CORE_INSTALL_CMD:-}"
 CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh"
@@ -266,6 +270,136 @@ run_core_install() {
     fi
 }
 
+# Usage: variations_seed_country <check|patch>
+# check prints: none | ok | drifted|<country> | error|<reason>
+# patch prints: none | patched|<count> | error|<reason>
+variations_seed_country() {
+    local mode="$1"
+    local seed_paths=()
+    local name
+    for name in "${VARIATIONS_SEED_FILES[@]}"; do
+        if [ -f "$CHROME_USER_DATA_DIR/$name" ]; then
+            seed_paths+=("$CHROME_USER_DATA_DIR/$name")
+        fi
+    done
+
+    if [ "${#seed_paths[@]}" -eq 0 ]; then
+        echo "none"
+        return 0
+    fi
+
+    python3 - "$mode" "${seed_paths[@]}" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+# Top-level fields of Chrome's stored seed record: 6 = session country, 7 = permanent country.
+COUNTRY_FIELDS = (6, 7)
+TARGET = b"us"
+
+
+def zstd(data, decompress):
+    try:
+        from compression import zstd as zstd_module  # Python 3.14+
+        return zstd_module.decompress(data) if decompress else zstd_module.compress(data)
+    except ImportError:
+        pass
+    if shutil.which("zstd") is None:
+        raise RuntimeError("zstd_unavailable")
+    args = ["zstd", "-dc"] if decompress else ["zstd", "-qc"]
+    return subprocess.run(args, input=data, stdout=subprocess.PIPE, check=True).stdout
+
+
+def read_varint(data, i):
+    result = shift = 0
+    while True:
+        byte = data[i]
+        i += 1
+        result |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            return result, i
+
+
+def country_spans(data):
+    spans = []
+    i = 0
+    while i < len(data):
+        key, i = read_varint(data, i)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            _, i = read_varint(data, i)
+        elif wire == 1:
+            i += 8
+        elif wire == 2:
+            length, i = read_varint(data, i)
+            if field in COUNTRY_FIELDS and length == 2:
+                spans.append((i, bytes(data[i:i + 2])))
+            i += length
+        elif wire == 5:
+            i += 4
+        else:
+            raise ValueError("bad_wire_type")
+    return spans
+
+
+def main():
+    mode, paths = sys.argv[1], sys.argv[2:]
+    drifted = []
+    patched = 0
+    for path in paths:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        compressed = raw.startswith(ZSTD_MAGIC)
+        payload = bytearray(zstd(raw, True) if compressed else raw)
+        spans = [(pos, value) for pos, value in country_spans(payload) if value != TARGET]
+        if not spans:
+            continue
+        if mode == "check":
+            drifted.append(spans[0][1].decode("ascii", "replace"))
+            continue
+        for pos, _ in spans:
+            payload[pos:pos + 2] = TARGET
+        output = zstd(bytes(payload), False) if compressed else bytes(payload)
+        shutil.copy2(path, path + ".bak")
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "wb") as handle:
+            handle.write(output)
+        os.chmod(tmp_path, os.stat(path).st_mode & 0o777)
+        os.replace(tmp_path, path)
+        patched += 1
+
+    if mode == "check":
+        print("drifted|" + drifted[0] if drifted else "ok")
+    else:
+        print("patched|%d" % patched)
+
+
+try:
+    main()
+except RuntimeError as error:
+    print("error|seed_" + str(error))
+except Exception:
+    print("error|seed_unreadable")
+PY
+}
+
+patch_variations_seed_country() {
+    local result
+    result=$(variations_seed_country patch)
+    case "$result" in
+        none) ;;
+        patched\|0) ;;
+        patched\|*) log "Variations seed country set to us (${result#patched|} file(s))." ;;
+        *)
+            log "Variations seed patch failed: ${result#error|}. Install zstd (brew install zstd) and retry."
+            return 1
+            ;;
+    esac
+}
+
 get_chrome_version() {
     if [ -n "${GEMINI_CHROME_VERSION:-}" ]; then
         printf '%s' "$GEMINI_CHROME_VERSION"
@@ -355,7 +489,13 @@ PY
     elif [ "$has_glic_false" = "1" ]; then
         echo "drifted|glic_not_eligible"
     else
-        echo "healthy|ok"
+        local seed_result
+        seed_result=$(variations_seed_country check)
+        case "$seed_result" in
+            none|ok) echo "healthy|ok" ;;
+            drifted\|*) echo "drifted|variations_seed_country=${seed_result#drifted|}" ;;
+            *) echo "unknown|${seed_result#error|}" ;;
+        esac
     fi
 }
 
@@ -466,7 +606,7 @@ perform_patch_and_verify() {
     fi
     arm_active_lock_cleanup
 
-    if ! run_core_install; then
+    if ! run_core_install || ! patch_variations_seed_country; then
         upsert_pending_record "patch_failed" "$patch_reason"
         write_last_result "patch_failed" "$patch_reason" "$chrome_ver" "Run $INSTALL_DIR/patch.sh manual"
         disarm_active_lock_cleanup

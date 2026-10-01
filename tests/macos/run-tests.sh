@@ -209,6 +209,74 @@ if run_case "verify-failure-recorded" env \
   assert_file_contains "$TMPDIR/runtime/verify-failure/last-result" "status=verify_failed"
 fi
 
+SEED_HELPER="$REPO_ROOT/tests/helpers/variations-seed.py"
+
+SEED_STATUS_DIR="$TMP_ROOT/runtime/seed-status"
+mkdir -p "$SEED_STATUS_DIR"
+cp "$FIXTURE_DIR/healthy.json" "$SEED_STATUS_DIR/Local State"
+python3 "$SEED_HELPER" write "$SEED_STATUS_DIR/VariationsSeedV2" cn cn
+if run_case "status-drifted-variations-seed-country" env \
+  GEMINI_LOCAL_STATE_PATH="$SEED_STATUS_DIR/Local State" \
+  GEMINI_CHROME_VERSION="153.0.8010.53" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh status; then
+  assert_contains "${CASE_OUTPUT}" "Current state: drifted"
+fi
+
+SEED_PATCH_DIR="$TMP_ROOT/runtime/seed-patch"
+mkdir -p "$SEED_PATCH_DIR"
+cp "$FIXTURE_DIR/healthy.json" "$SEED_PATCH_DIR/Local State"
+python3 "$SEED_HELPER" write "$SEED_PATCH_DIR/VariationsSeedV2" cn cn
+python3 "$SEED_HELPER" write "$SEED_PATCH_DIR/VariationsSafeSeedV2" cn us
+if run_case "run-patches-variations-seed-country" env \
+  GEMINI_INSTALL_DIR="$SEED_PATCH_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$SEED_PATCH_DIR/Local State" \
+  GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+  GEMINI_FAKE_INSTALL_MODE="success" \
+  GEMINI_CHROME_VERSION="153.0.8010.53" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash -c "bash patch.sh run && python3 '$SEED_HELPER' read '$SEED_PATCH_DIR/VariationsSeedV2' && python3 '$SEED_HELPER' read '$SEED_PATCH_DIR/VariationsSafeSeedV2' && python3 '$SEED_HELPER' read '$SEED_PATCH_DIR/VariationsSeedV2.bak'"; then
+  assert_file_contains "$SEED_PATCH_DIR/last-result" "status=healthy"
+  assert_contains "${CASE_OUTPUT}" "us,us
+us,us
+cn,cn"
+fi
+
+if command -v zstd >/dev/null 2>&1; then
+  SEED_ZSTD_DIR="$TMP_ROOT/runtime/seed-zstd"
+  mkdir -p "$SEED_ZSTD_DIR"
+  cp "$FIXTURE_DIR/healthy.json" "$SEED_ZSTD_DIR/Local State"
+  python3 "$SEED_HELPER" write "$SEED_ZSTD_DIR/VariationsSeedV2" cn cn zstd
+  if run_case "run-patches-zstd-variations-seed" env \
+    GEMINI_INSTALL_DIR="$SEED_ZSTD_DIR" \
+    GEMINI_LOCAL_STATE_PATH="$SEED_ZSTD_DIR/Local State" \
+    GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+    GEMINI_FAKE_INSTALL_MODE="success" \
+    GEMINI_CHROME_VERSION="153.0.8010.53" \
+    GEMINI_CHROME_RUNNING="0" \
+    bash -c "bash patch.sh run && head -c 4 '$SEED_ZSTD_DIR/VariationsSeedV2' | xxd -p && python3 '$SEED_HELPER' read '$SEED_ZSTD_DIR/VariationsSeedV2'"; then
+    assert_file_contains "$SEED_ZSTD_DIR/last-result" "status=healthy"
+    assert_contains "${CASE_OUTPUT}" "28b52ffd"
+    assert_contains "${CASE_OUTPUT}" "us,us"
+  fi
+else
+  echo "[SKIP] run-patches-zstd-variations-seed (zstd not installed)"
+fi
+
+SEED_NOZSTD_DIR="$TMP_ROOT/runtime/seed-nozstd"
+mkdir -p "$SEED_NOZSTD_DIR/bin"
+cp "$FIXTURE_DIR/healthy.json" "$SEED_NOZSTD_DIR/Local State"
+printf '\x28\xb5\x2f\xfdjunk' > "$SEED_NOZSTD_DIR/VariationsSeedV2"
+ln -s "$(command -v python3)" "$SEED_NOZSTD_DIR/bin/python3"
+if run_case "status-unknown-when-zstd-unavailable" env \
+  PATH="$SEED_NOZSTD_DIR/bin:/usr/bin:/bin" \
+  GEMINI_LOCAL_STATE_PATH="$SEED_NOZSTD_DIR/Local State" \
+  GEMINI_CHROME_VERSION="153.0.8010.53" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh status; then
+  assert_contains "${CASE_OUTPUT}" "Current state: unknown"
+fi
+
 WATCHER_RUNTIME_DIR="$TMP_ROOT/runtime/watcher-patches"
 if run_case "watcher-patches-on-chrome-close" bash -c "
   mkdir -p '$WATCHER_RUNTIME_DIR'

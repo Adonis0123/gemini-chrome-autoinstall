@@ -29,9 +29,14 @@ kill_port() {
 
 start_server() { # $1 = fixture dir
     kill_port
-    python3 -m http.server $PORT -d "$1" &>/dev/null &
+    # Loopback only: CI macOS runners silently drop connections to servers bound on all interfaces.
+    python3 -m http.server $PORT --bind 127.0.0.1 -d "$1" &>/dev/null &
     SERVER_PID=$!
-    sleep 0.5
+    local waited=0
+    until curl -s -o /dev/null "http://127.0.0.1:$PORT/" || [ "$waited" -ge 50 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
 }
 
 stop_server() {
@@ -95,7 +100,7 @@ assert_file_not_exists() { # $1=file, $2=test name
 
 run_patch() { # runs patch.sh run in isolated env
     GEMINI_INSTALL_DIR="$TEST_INSTALL_DIR" \
-    GEMINI_RAW_BASE="http://localhost:$PORT" \
+    GEMINI_RAW_BASE="http://127.0.0.1:$PORT" \
     GEMINI_LOG_FILE="$TEST_LOG_FILE" \
     GEMINI_LOCAL_STATE_PATH="/dev/null" \
         bash "$TEST_INSTALL_DIR/patch.sh" run 2>/dev/null || true

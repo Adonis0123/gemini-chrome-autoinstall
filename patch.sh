@@ -33,6 +33,11 @@ PLIST_VERSION="2"
 REPO="Adonis0123/gemini-chrome-autoinstall"
 BRANCH="master"
 RAW_BASE="${GEMINI_RAW_BASE:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
+# launchd starts agents with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which hides Homebrew's zstd.
+EXTRA_PATH="${GEMINI_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}"
+if [ -n "$EXTRA_PATH" ]; then
+    PATH="$PATH:$EXTRA_PATH"
+fi
 
 log() {
     mkdir -p "$(dirname "$LOG_FILE")"

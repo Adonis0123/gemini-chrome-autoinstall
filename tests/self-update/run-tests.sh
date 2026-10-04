@@ -6,13 +6,15 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FIXTURES="$SCRIPT_DIR/fixtures"
 TEST_INSTALL_DIR=$(mktemp -d)
 TEST_LOG_FILE="$TEST_INSTALL_DIR/test.log"
+# Isolated HOME: `run` refreshes LaunchAgents under $HOME and would point them at this temp dir.
+TEST_HOME=$(mktemp -d)
 PORT=18923
 PASS=0
 FAIL=0
 
 cleanup() {
     stop_server
-    rm -rf "$TEST_INSTALL_DIR"
+    rm -rf "$TEST_INSTALL_DIR" "$TEST_HOME"
 }
 trap cleanup EXIT
 
@@ -99,6 +101,7 @@ assert_file_not_exists() { # $1=file, $2=test name
 }
 
 run_patch() { # runs patch.sh run in isolated env
+    HOME="$TEST_HOME" \
     GEMINI_INSTALL_DIR="$TEST_INSTALL_DIR" \
     GEMINI_RAW_BASE="http://127.0.0.1:$PORT" \
     GEMINI_LOG_FILE="$TEST_LOG_FILE" \
@@ -165,6 +168,7 @@ reset_install_dir
 echo "v0.0.1" > "$TEST_INSTALL_DIR/VERSION"
 rm -f "$TEST_INSTALL_DIR/last-update-check"
 # No server started — use unreachable address
+HOME="$TEST_HOME" \
 GEMINI_INSTALL_DIR="$TEST_INSTALL_DIR" \
 GEMINI_RAW_BASE="http://127.0.0.1:19999" \
 GEMINI_LOG_FILE="$TEST_LOG_FILE" \

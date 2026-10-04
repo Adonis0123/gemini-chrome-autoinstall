@@ -263,6 +263,29 @@ else
   echo "[SKIP] run-patches-zstd-variations-seed (zstd not installed)"
 fi
 
+# launchd agents only get PATH=/usr/bin:/bin:/usr/sbin:/sbin; Homebrew's zstd must still be found.
+SEED_LAUNCHD_DIR="$TMP_ROOT/runtime/seed-launchd-path"
+ZSTD_BIN="$(command -v zstd || true)"
+if [[ "${ZSTD_BIN}" == /opt/homebrew/bin/zstd || "${ZSTD_BIN}" == /usr/local/bin/zstd ]]; then
+  mkdir -p "$SEED_LAUNCHD_DIR"
+  cp "$FIXTURE_DIR/healthy.json" "$SEED_LAUNCHD_DIR/Local State"
+  python3 "$SEED_HELPER" write "$SEED_LAUNCHD_DIR/VariationsSeedV2" cn cn zstd
+  if run_case "run-patches-zstd-seed-under-launchd-path" env \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    GEMINI_INSTALL_DIR="$SEED_LAUNCHD_DIR" \
+    GEMINI_LOCAL_STATE_PATH="$SEED_LAUNCHD_DIR/Local State" \
+    GEMINI_CORE_INSTALL_CMD="$REPO_ROOT/tests/helpers/fake-core-install.sh" \
+    GEMINI_FAKE_INSTALL_MODE="success" \
+    GEMINI_CHROME_VERSION="153.0.8010.53" \
+    GEMINI_CHROME_RUNNING="0" \
+    bash patch.sh run; then
+    assert_file_contains "$SEED_LAUNCHD_DIR/last-result" "status=healthy"
+    assert_contains "$(python3 "$SEED_HELPER" read "$SEED_LAUNCHD_DIR/VariationsSeedV2")" "us,us"
+  fi
+else
+  echo "[SKIP] run-patches-zstd-seed-under-launchd-path (zstd not in a Homebrew prefix)"
+fi
+
 SEED_NOZSTD_DIR="$TMP_ROOT/runtime/seed-nozstd"
 mkdir -p "$SEED_NOZSTD_DIR/bin"
 cp "$FIXTURE_DIR/healthy.json" "$SEED_NOZSTD_DIR/Local State"
@@ -270,6 +293,7 @@ printf '\x28\xb5\x2f\xfdjunk' > "$SEED_NOZSTD_DIR/VariationsSeedV2"
 ln -s "$(command -v python3)" "$SEED_NOZSTD_DIR/bin/python3"
 if run_case "status-unknown-when-zstd-unavailable" env \
   PATH="$SEED_NOZSTD_DIR/bin:/usr/bin:/bin" \
+  GEMINI_EXTRA_PATH="" \
   GEMINI_LOCAL_STATE_PATH="$SEED_NOZSTD_DIR/Local State" \
   GEMINI_CHROME_VERSION="153.0.8010.53" \
   GEMINI_CHROME_RUNNING="1" \

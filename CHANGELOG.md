@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Find Homebrew zstd under launchd and isolate HOME in self-update tests([1479716](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/14797161382b2904687375b1d76feebe34017f71))
+## [0.6.4] - 2026-10-01
+
+### Bug Fixes
+
 - Patch variations seed country for Chrome 153+([3661ea0](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/3661ea0bba18d2e803061bd2bc5741f17eef65e4))
 ## [0.6.3] - 2026-05-07
 

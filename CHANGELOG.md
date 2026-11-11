@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- *(windows)* Survive antivirus quarantine of patch.ps1([863fa76](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/863fa769b8f5f18232cf8c1fbf0ba37a0e0a3191))
+## [0.6.5] - 2026-10-04
+
+### Bug Fixes
+
 - Find Homebrew zstd under launchd and isolate HOME in self-update tests([1479716](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/14797161382b2904687375b1d76feebe34017f71))
 ## [0.6.4] - 2026-10-01
 

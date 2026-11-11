@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Reopen Chrome only after the in-progress patch finishes([06a51ba](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/06a51babbac78bba3df7db57b4ed277df5103d88))
+## [0.6.6] - 2026-11-11
+
+### Bug Fixes
+
 - *(windows)* Survive antivirus quarantine of patch.ps1([863fa76](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/863fa769b8f5f18232cf8c1fbf0ba37a0e0a3191))
 ## [0.6.5] - 2026-10-04
 

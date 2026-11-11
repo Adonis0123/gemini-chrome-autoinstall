@@ -1170,15 +1170,78 @@ function Invoke-Run {
     [void](Invoke-Reconcile -Trigger "run")
 }
 
+function Test-ActiveLockHeldByLiveProcess {
+    if (-not (Test-Path $ActiveLockDir)) {
+        return $false
+    }
+
+    $pidFile = Join-Path $ActiveLockDir "pid"
+    if (-not (Test-Path $pidFile)) {
+        return $true
+    }
+
+    $holderPid = 0
+    if (-not [int]::TryParse((Get-Content $pidFile -Raw -ErrorAction SilentlyContinue), [ref]$holderPid)) {
+        return $true
+    }
+
+    return [bool](Get-Process -Id $holderPid -ErrorAction SilentlyContinue)
+}
+
+function Wait-ActiveLockReleased {
+    # Manual must not reopen Chrome while another run still holds the lock:
+    # that run may still be writing the variations seed, and Chrome would
+    # load the old country into memory for the rest of the session.
+    $timeout = 180
+    $parsedTimeout = 0
+    if ($env:GEMINI_LOCK_WAIT_SECONDS -and [int]::TryParse($env:GEMINI_LOCK_WAIT_SECONDS, [ref]$parsedTimeout) -and $parsedTimeout -ge 0) {
+        $timeout = $parsedTimeout
+    }
+
+    $waited = 0
+    while (Test-ActiveLockHeldByLiveProcess) {
+        if ($waited -ge $timeout) {
+            return $false
+        }
+        Start-Sleep -Seconds 1
+        $waited++
+    }
+    return $true
+}
+
+function Stop-ChromeForPatch {
+    # Tests set GEMINI_CHROME_RUNNING / GEMINI_CHROME_START_LOG so a manual
+    # run must not kill or launch the real browser on the machine.
+    if ($env:GEMINI_CHROME_RUNNING -or $env:GEMINI_CHROME_START_LOG) {
+        $env:GEMINI_CHROME_RUNNING = "0"
+        return
+    }
+
+    Stop-Process -Name "chrome" -Force -ErrorAction SilentlyContinue
+}
+
+function Start-ChromeForPatch {
+    if ($env:GEMINI_CHROME_START_LOG) {
+        Add-Content -Path $env:GEMINI_CHROME_START_LOG -Value "start"
+        return
+    }
+
+    Start-Process "chrome"
+}
+
 function Invoke-Manual {
     Write-Log "Manual install triggered."
     $reopenChrome = $false
 
     if (Test-IsChromeRunning) {
-        $response = Read-Host "Chrome is running. Close it to continue? (Y/N)"
+        if ($env:GEMINI_ASSUME_CHROME_CLOSE -eq "1") {
+            $response = "Y"
+        } else {
+            $response = Read-Host "Chrome is running. Close it to continue? (Y/N)"
+        }
         if ($response -eq 'Y' -or $response -eq 'y') {
             Write-Log "Closing Chrome (user confirmed)..."
-            Stop-Process -Name "chrome" -Force -ErrorAction SilentlyContinue
+            Stop-ChromeForPatch
             $reopenChrome = $true
             $waited = 0
             while (Test-IsChromeRunning) {
@@ -1195,15 +1258,38 @@ function Invoke-Manual {
         }
     }
 
-    # Wait for filesystem to flush after Chrome exit
-    Start-Sleep -Seconds 2
-
-    $success = Invoke-Reconcile -Trigger "manual"
-
-    if ($success -and $reopenChrome) {
+    # Wait for filesystem to flush after Chrome exit. Simulated runs skip this.
+    if (-not $env:GEMINI_CHROME_START_LOG) {
         Start-Sleep -Seconds 2
-        Write-Log "Reopening Chrome..."
-        Start-Process "chrome"
+    }
+
+    [void](Invoke-Reconcile -Trigger "manual")
+
+    if ($reopenChrome) {
+        $lockClear = $true
+        if (Test-Path $ActiveLockDir) {
+            Write-Log "Manual: waiting for the in-progress patch to finish before reopening Chrome."
+            $lockClear = Wait-ActiveLockReleased
+        }
+        if (-not $lockClear) {
+            Write-Log "Manual: leaving Chrome closed because another patch is still running."
+            return
+        }
+
+        $state = Get-PatchState
+        if ($state.state -ne "healthy" -and -not (Test-IsChromeRunning)) {
+            [void](Invoke-Reconcile -Trigger "manual")
+            $state = Get-PatchState
+        }
+        if ($state.state -eq "healthy") {
+            if (-not $env:GEMINI_CHROME_START_LOG) {
+                Start-Sleep -Seconds 2
+            }
+            Write-Log "Reopening Chrome..."
+            Start-ChromeForPatch
+        } else {
+            Write-Log "Manual: leaving Chrome closed because state is $($state.state)."
+        }
     }
 }
 

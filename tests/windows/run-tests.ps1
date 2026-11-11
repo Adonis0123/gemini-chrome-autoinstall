@@ -58,7 +58,10 @@ function Invoke-Case {
     "GEMINI_SKIP_FIRST_PATCH",
     "GEMINI_SKIP_SELF_UPDATE",
     "GEMINI_SKIP_WATCHER_START",
-    "GEMINI_ZSTD_PATH"
+    "GEMINI_ZSTD_PATH",
+    "GEMINI_ASSUME_CHROME_CLOSE",
+    "GEMINI_CHROME_START_LOG",
+    "GEMINI_LOCK_WAIT_SECONDS"
   )
 
   $originalEnv = @{}
@@ -412,6 +415,79 @@ public sealed class GeminiChromeProcessProbe : IDisposable
     if (-not $?) { throw "patch.ps1 manual failed in manual-unknown-recovers" }
     Assert-FileContains (Join-Path $manualUnknownRuntimeRoot "last-result") "status=healthy"
   } -CaseEnv $manualUnknownEnv
+
+  $manualBusyCaseRoot = Join-Path $RunRoot "manual-waits-for-active-lock"
+  $manualBusyRuntimeRoot = Join-Path $manualBusyCaseRoot "runtime"
+  $manualBusyLocalState = Join-Path $manualBusyRuntimeRoot "Local State"
+  $manualBusyTemp = Join-Path $manualBusyCaseRoot "temp"
+  $manualBusyLock = Join-Path $manualBusyTemp "gemini-chrome-autoinstall.active.lock"
+  $manualBusyStartLog = Join-Path $manualBusyCaseRoot "chrome-start.log"
+  $manualBusyEnv = @{
+    "USERPROFILE" = Join-Path $manualBusyCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $manualBusyCaseRoot "localappdata"
+    "TEMP" = $manualBusyTemp
+    "TMP" = $manualBusyTemp
+    "TMPDIR" = $manualBusyTemp
+    "GEMINI_INSTALL_DIR" = $manualBusyRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = $manualBusyLocalState
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "1"
+    "GEMINI_ASSUME_CHROME_CLOSE" = "1"
+    "GEMINI_CHROME_START_LOG" = $manualBusyStartLog
+    "GEMINI_LOCK_WAIT_SECONDS" = "0"
+  }
+  Invoke-Case "manual-does-not-reopen-while-patch-lock-held" {
+    New-Item -ItemType Directory -Force -Path $manualBusyRuntimeRoot, $manualBusyLock | Out-Null
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") $manualBusyLocalState -Force
+    Set-Content -Path (Join-Path $manualBusyLock "pid") -Value $PID -NoNewline
+    & "$RepoRoot\patch.ps1" manual | Out-Null
+    if (-not $?) { throw "patch.ps1 manual failed in manual-does-not-reopen-while-patch-lock-held" }
+    Assert-FileContains (Join-Path $manualBusyCaseRoot "localappdata\gemini-chrome-autoinstall.log") "another patch is still running"
+    Assert-FileMissing $manualBusyStartLog
+  } -CaseEnv $manualBusyEnv
+
+  $manualReleaseCaseRoot = Join-Path $RunRoot "manual-reopens-after-lock"
+  $manualReleaseRuntimeRoot = Join-Path $manualReleaseCaseRoot "runtime"
+  $manualReleaseLocalState = Join-Path $manualReleaseRuntimeRoot "Local State"
+  $manualReleaseTemp = Join-Path $manualReleaseCaseRoot "temp"
+  $manualReleaseLock = Join-Path $manualReleaseTemp "gemini-chrome-autoinstall.active.lock"
+  $manualReleaseStartLog = Join-Path $manualReleaseCaseRoot "chrome-start.log"
+  $manualReleaseHealthy = Join-Path $FixtureDir "healthy.json"
+  $manualReleaseEnv = @{
+    "USERPROFILE" = Join-Path $manualReleaseCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $manualReleaseCaseRoot "localappdata"
+    "TEMP" = $manualReleaseTemp
+    "TMP" = $manualReleaseTemp
+    "TMPDIR" = $manualReleaseTemp
+    "GEMINI_INSTALL_DIR" = $manualReleaseRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = $manualReleaseLocalState
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "1"
+    "GEMINI_ASSUME_CHROME_CLOSE" = "1"
+    "GEMINI_CHROME_START_LOG" = $manualReleaseStartLog
+    "GEMINI_LOCK_WAIT_SECONDS" = "8"
+  }
+  Invoke-Case "manual-reopens-after-in-progress-patch" {
+    New-Item -ItemType Directory -Force -Path $manualReleaseRuntimeRoot, $manualReleaseLock | Out-Null
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") $manualReleaseLocalState -Force
+    Set-Content -Path (Join-Path $manualReleaseLock "pid") -Value $PID -NoNewline
+    $releaseJob = Start-Job -ScriptBlock {
+      param($HealthyPath, $StatePath, $LockPath)
+      Start-Sleep -Seconds 2
+      Copy-Item -LiteralPath $HealthyPath -Destination $StatePath -Force
+      Remove-Item -LiteralPath $LockPath -Recurse -Force
+    } -ArgumentList $manualReleaseHealthy, $manualReleaseLocalState, $manualReleaseLock
+    try {
+      & "$RepoRoot\patch.ps1" manual | Out-Null
+      if (-not $?) { throw "patch.ps1 manual failed in manual-reopens-after-in-progress-patch" }
+    }
+    finally {
+      Wait-Job $releaseJob -Timeout 10 | Out-Null
+      Remove-Job $releaseJob -Force -ErrorAction SilentlyContinue
+    }
+    Assert-FileContains $manualReleaseStartLog "start"
+    Assert-FileContains (Join-Path $manualReleaseCaseRoot "localappdata\gemini-chrome-autoinstall.log") "Reopening Chrome..."
+  } -CaseEnv $manualReleaseEnv
 
   $blockedCaseRoot = Join-Path $RunRoot "chrome-running-creates-pending"
   $blockedRuntimeRoot = Join-Path $blockedCaseRoot "runtime"

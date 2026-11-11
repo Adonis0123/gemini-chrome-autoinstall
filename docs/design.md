@@ -194,6 +194,8 @@ Purpose:
 
 There is no time-based suppression path anymore. Repeated triggers are handled by current-state checks plus the active lock.
 
+`manual` may find the lock already held by a watcher that saw Chrome close. It waits for that lock to clear, then reopens Chrome only when detection still says `healthy`. Reopening while the lock is held loads the old variations country for the whole Chrome session.
+
 ## 9. Reconcile Flow
 
 ### Automatic path

@@ -1079,56 +1079,140 @@ cmd_retry() {
     return 0
 }
 
+active_lock_held_by_live_process() {
+    if [ ! -d "$ACTIVE_LOCK_DIR" ]; then
+        return 1
+    fi
+    local pid_file="$ACTIVE_LOCK_DIR/pid"
+    if [ ! -f "$pid_file" ]; then
+        return 0
+    fi
+    local old_pid
+    old_pid=$(cat "$pid_file" 2>/dev/null || true)
+    if [ -z "$old_pid" ]; then
+        return 0
+    fi
+    kill -0 "$old_pid" 2>/dev/null
+}
+
+wait_for_active_lock() {
+    # Manual must not reopen Chrome while another run still holds the lock:
+    # that run may still be writing the variations seed, and Chrome would
+    # load the old country into memory for the rest of the session.
+    local timeout="${GEMINI_LOCK_WAIT_SECONDS:-180}"
+    local waited=0
+    while active_lock_held_by_live_process; do
+        if [ -n "${GEMINI_LOCK_RELEASE_CMD:-}" ]; then
+            local release_command="$GEMINI_LOCK_RELEASE_CMD"
+            unset GEMINI_LOCK_RELEASE_CMD
+            eval "$release_command"
+        fi
+        if ! active_lock_held_by_live_process; then
+            return 0
+        fi
+        if [ "$waited" -ge "$timeout" ]; then
+            return 1
+        fi
+        sleep 1
+        waited=$(( waited + 1 ))
+    done
+    return 0
+}
+
+start_chrome() {
+    if [ -n "${GEMINI_CHROME_START_LOG:-}" ]; then
+        echo start >> "$GEMINI_CHROME_START_LOG"
+        return 0
+    fi
+    open -a "Google Chrome"
+}
+
 cmd_manual() {
     log "Manual install triggered."
     local reopen_chrome=false
 
     if is_chrome_running; then
-        printf "Chrome is running. Close it to continue? (Y/N): "
-        read -r response < /dev/tty
+        local response
+        if [ "${GEMINI_ASSUME_CHROME_CLOSE:-}" = "1" ]; then
+            response="Y"
+        else
+            printf "Chrome is running. Close it to continue? (Y/N): "
+            read -r response < /dev/tty
+        fi
         if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
             log "Closing Chrome (user confirmed)..."
-            # Stage 1: graceful AppleScript quit (like Cmd+Q)
-            osascript -e 'quit app "Google Chrome"' 2>/dev/null || true
             reopen_chrome=true
-            local waited=0
-            while is_chrome_running; do
-                if [ "$waited" -ge 30 ]; then
-                    echo "Chrome did not exit in time. Please close it manually and retry."
-                    return 1
+            # Tests set these so a manual run must not kill the real browser.
+            if [ -n "${GEMINI_CHROME_RUNNING:-}" ] || [ -n "${GEMINI_CHROME_RUNNING_FILE:-}" ]; then
+                GEMINI_CHROME_RUNNING=0
+                if [ -n "${GEMINI_CHROME_RUNNING_FILE:-}" ]; then
+                    printf '0' > "$GEMINI_CHROME_RUNNING_FILE"
                 fi
-                # Stage 2: SIGTERM after 10s
-                if [ "$waited" -eq 10 ]; then
-                    log "Chrome still running after graceful quit, sending SIGTERM..."
-                    killall "Google Chrome" 2>/dev/null || true
-                fi
-                # Stage 3: SIGKILL after 20s
-                if [ "$waited" -eq 20 ]; then
-                    log "Chrome still running after SIGTERM, sending SIGKILL..."
-                    killall -9 "Google Chrome" 2>/dev/null || true
-                fi
-                sleep 2
-                waited=$(( waited + 2 ))
-            done
+            else
+                # Stage 1: graceful AppleScript quit (like Cmd+Q)
+                osascript -e 'quit app "Google Chrome"' 2>/dev/null || true
+                local waited=0
+                while is_chrome_running; do
+                    if [ "$waited" -ge 30 ]; then
+                        echo "Chrome did not exit in time. Please close it manually and retry."
+                        return 1
+                    fi
+                    # Stage 2: SIGTERM after 10s
+                    if [ "$waited" -eq 10 ]; then
+                        log "Chrome still running after graceful quit, sending SIGTERM..."
+                        killall "Google Chrome" 2>/dev/null || true
+                    fi
+                    # Stage 3: SIGKILL after 20s
+                    if [ "$waited" -eq 20 ]; then
+                        log "Chrome still running after SIGTERM, sending SIGKILL..."
+                        killall -9 "Google Chrome" 2>/dev/null || true
+                    fi
+                    sleep 2
+                    waited=$(( waited + 2 ))
+                done
+            fi
         else
             echo "Cancelled."
             return 0
         fi
     fi
 
-    # Wait for filesystem to flush after Chrome exit
-    sleep 2
-
-    reconcile_patch_state "manual"
-    local rc=$?
-
-    if [ "$rc" -eq 0 ] && [ "$reopen_chrome" = true ]; then
+    # Wait for filesystem to flush after Chrome exit. Simulated runs skip this.
+    if [ -z "${GEMINI_CHROME_START_LOG:-}" ]; then
         sleep 2
-        log "Reopening Chrome..."
-        open -a "Google Chrome"
     fi
 
-    return $rc
+    reconcile_patch_state "manual" || true
+
+    if [ "$reopen_chrome" = true ]; then
+        if [ -d "$ACTIVE_LOCK_DIR" ]; then
+            log "Manual: waiting for the in-progress patch to finish before reopening Chrome."
+            if ! wait_for_active_lock; then
+                log "Manual: leaving Chrome closed because another patch is still running."
+                return 0
+            fi
+        fi
+
+        local state_line state
+        state_line=$(detect_patch_state)
+        state="${state_line%%|*}"
+        if [ "$state" != "healthy" ] && ! is_chrome_running; then
+            reconcile_patch_state "manual" || true
+            state_line=$(detect_patch_state)
+            state="${state_line%%|*}"
+        fi
+        if [ "$state" = "healthy" ]; then
+            if [ -z "${GEMINI_CHROME_START_LOG:-}" ]; then
+                sleep 2
+            fi
+            log "Reopening Chrome..."
+            start_chrome
+        else
+            log "Manual: leaving Chrome closed because state is ${state}."
+        fi
+    fi
+
+    return 0
 }
 
 # Main

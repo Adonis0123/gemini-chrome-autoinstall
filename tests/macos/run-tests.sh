@@ -175,6 +175,45 @@ if run_case "chrome-running-creates-pending" env \
   assert_file_contains "$TMPDIR/runtime/last-result" "status=blocked"
 fi
 
+MANUAL_LOCK="/tmp/gemini-chrome-autoinstall.active.lock"
+rm -rf "$MANUAL_LOCK"
+mkdir -p "$TMPDIR/manual-lock-busy" "$MANUAL_LOCK"
+cp "$FIXTURE_DIR/drifted-variations-country.json" "$TMPDIR/manual-lock-busy/Local State"
+echo $$ > "$MANUAL_LOCK/pid"
+if run_case "manual-does-not-reopen-while-patch-lock-held" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/manual-lock-busy" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/manual-lock-busy/Local State" \
+  GEMINI_LOG_FILE="$TMPDIR/manual-lock-busy/patch.log" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="1" \
+  GEMINI_ASSUME_CHROME_CLOSE="1" \
+  GEMINI_CHROME_START_LOG="$TMPDIR/manual-lock-busy/chrome-start.log" \
+  GEMINI_LOCK_WAIT_SECONDS="0" \
+  bash patch.sh manual; then
+  assert_file_contains "$TMPDIR/manual-lock-busy/patch.log" "another patch is still running"
+  assert_file_missing "$TMPDIR/manual-lock-busy/chrome-start.log"
+fi
+rm -rf "$MANUAL_LOCK"
+
+mkdir -p "$TMPDIR/manual-lock-release" "$MANUAL_LOCK"
+cp "$FIXTURE_DIR/drifted-variations-country.json" "$TMPDIR/manual-lock-release/Local State"
+echo $$ > "$MANUAL_LOCK/pid"
+if run_case "manual-reopens-after-in-progress-patch" env \
+  GEMINI_INSTALL_DIR="$TMPDIR/manual-lock-release" \
+  GEMINI_LOCAL_STATE_PATH="$TMPDIR/manual-lock-release/Local State" \
+  GEMINI_LOG_FILE="$TMPDIR/manual-lock-release/patch.log" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="1" \
+  GEMINI_ASSUME_CHROME_CLOSE="1" \
+  GEMINI_CHROME_START_LOG="$TMPDIR/manual-lock-release/chrome-start.log" \
+  GEMINI_LOCK_WAIT_SECONDS="0" \
+  GEMINI_LOCK_RELEASE_CMD="cp '$FIXTURE_DIR/healthy.json' '$TMPDIR/manual-lock-release/Local State' && rm -rf '$MANUAL_LOCK'" \
+  bash patch.sh manual; then
+  assert_file_contains "$TMPDIR/manual-lock-release/patch.log" "Reopening Chrome..."
+  assert_file_contains "$TMPDIR/manual-lock-release/chrome-start.log" "start"
+fi
+rm -rf "$MANUAL_LOCK"
+
 if run_case "pending-settles-after-close" env \
   GEMINI_INSTALL_DIR="$TMPDIR/runtime" \
   GEMINI_LOCAL_STATE_PATH="$TMPDIR/runtime/Local State" \

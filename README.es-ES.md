@@ -168,6 +168,35 @@ gemini-chrome-fix
 
 Esto mantiene la ruta de recuperación predecible y le proporciona una salida manual estable, incluso si la reconciliación automática no puede converger.
 
+## Solución de problemas: falsos positivos del antivirus (Windows)
+
+Algunos antivirus marcan `patch.ps1` por heurística. Huorong (火绒) lo ha detectado como `HEUR:TrojanDownloader/PS.NetLoader.av`, y Windows Defender puede hacer lo mismo. `patch.ps1` descarga el instalador de Gemini-in-Chrome y sus propias actualizaciones, y eso es lo que activa la heurística. Es un falso positivo.
+
+Síntomas:
+
+- `gemini-chrome-fix` o `gemini-chrome-status` muestra `patch.ps1 not found at ... It was likely quarantined by antivirus`. Los perfiles de versiones anteriores muestran en su lugar el error de PowerShell `The term '...\patch.ps1' is not recognized`.
+- La reparación automática deja de funcionar sin avisar tras las actualizaciones de Chrome.
+- El registro (`%LOCALAPPDATA%\gemini-chrome-autoinstall.log`) contiene una línea `launcher: patch.ps1 not found at ...` o `Self-update aborted: downloaded patch.ps1 is missing or empty`.
+
+Solución:
+
+1. Restaure `patch.ps1` desde la cuarentena del antivirus, o salte este paso y reinstale en el paso 3.
+2. Agregue el directorio de instalación `%USERPROFILE%\.gemini-chrome-autoinstall\` a la lista de confianza del antivirus (Huorong: zona de confianza; Windows Defender: Protección antivirus y contra amenazas > Exclusiones). La autoactualización escribe archivos nuevos ahí, así que confíe en todo el directorio, no en un solo archivo.
+3. Reinstale desde PowerShell:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.ps1 | iex
+   ```
+
+4. Ejecute `gemini-chrome-status` para confirmar.
+5. Reporte el falso positivo al fabricante para que las próximas versiones no se marquen de nuevo: en Huorong mediante su formulario de falsos positivos, en Microsoft en <https://www.microsoft.com/wdsi/filesubmission>.
+
+Si `gemini-chrome-status` muestra `Legacy task: PRESENT`, una versión antigua dejó la tarea programada `GeminiChromeAutoPatch`, y cada inicio de sesión ejecuta la comprobación de arranque dos veces. Elimínela desde un PowerShell con privilegios de administrador:
+
+```powershell
+schtasks /delete /tn GeminiChromeAutoPatch /f
+```
+
 ## Registros (Logs)
 
 | Plataforma | Ruta |

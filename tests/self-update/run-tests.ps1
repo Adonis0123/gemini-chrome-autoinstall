@@ -91,6 +91,15 @@ function Assert-FileExists {
     }
 }
 
+function Assert-FileMissing {
+    param([string]$File, [string]$TestName)
+    if (-not (Test-Path $File)) {
+        $script:Pass++; Write-Host "  PASS: $TestName"
+    } else {
+        $script:Fail++; Write-Host "  FAIL: $TestName (unexpected file: $File)"
+    }
+}
+
 function Invoke-PatchRun {
     $env:GEMINI_INSTALL_DIR = $TestInstallDir
     $env:GEMINI_RAW_BASE = "http://localhost:$Port"
@@ -120,6 +129,9 @@ Stop-FixtureServer
 Assert-FileContent (Join-Path $TestInstallDir "VERSION") "v99.0.0" "VERSION updated to v99.0.0"
 Assert-Contains $TestLogFile "Self-updated from v0.0.1 to v99.0.0" "Log contains Self-updated message"
 Assert-FileExists (Join-Path $TestInstallDir "last-update-check") "Timestamp file created"
+Assert-FileContent (Join-Path $TestInstallDir "patch.ps1") (Get-Content (Join-Path $Fixtures "newer\patch.ps1") -Raw).Trim() "patch.ps1 replaced"
+Assert-FileMissing (Join-Path $TestInstallDir "patch.ps1.new") "No staged patch.ps1.new left behind"
+Assert-FileMissing (Join-Path $TestInstallDir "VERSION.new") "No staged VERSION.new left behind"
 Write-Host ""
 
 # --- Test 2: Version identical ---
@@ -213,6 +225,73 @@ Invoke-PatchRun
 Stop-FixtureServer
 Assert-FileContent (Join-Path $TestInstallDir "VERSION") "v99.0.0" "VERSION created from remote"
 Assert-Contains $TestLogFile "Self-updated from unknown to v99.0.0" "Log shows update from unknown"
+Write-Host ""
+
+# --- Test 9: Downloaded file is empty (antivirus quarantine) ---
+Write-Host "Test 9: Downloaded patch.ps1 is empty (quarantined) - abort and keep old files"
+Reset-InstallDir
+"v0.0.1" | Set-Content (Join-Path $TestInstallDir "VERSION") -NoNewline
+$originalHash = (Get-FileHash (Join-Path $TestInstallDir "patch.ps1")).Hash
+$originalLauncherHash = (Get-FileHash (Join-Path $TestInstallDir "launcher.vbs")).Hash
+Start-FixtureServer (Join-Path $Fixtures "empty")
+Invoke-PatchRun
+Stop-FixtureServer
+Assert-FileContent (Join-Path $TestInstallDir "VERSION") "v0.0.1" "VERSION unchanged after empty download"
+Assert-Contains $TestLogFile "Self-update aborted: downloaded patch.ps1 is missing or empty" "Log explains the aborted update"
+if ((Get-FileHash (Join-Path $TestInstallDir "patch.ps1")).Hash -eq $originalHash) {
+    $script:Pass++; Write-Host "  PASS: patch.ps1 unchanged"
+} else {
+    $script:Fail++; Write-Host "  FAIL: patch.ps1 was modified"
+}
+if ((Get-FileHash (Join-Path $TestInstallDir "launcher.vbs")).Hash -eq $originalLauncherHash) {
+    $script:Pass++; Write-Host "  PASS: launcher.vbs unchanged"
+} else {
+    $script:Fail++; Write-Host "  FAIL: launcher.vbs was modified"
+}
+Assert-FileMissing (Join-Path $TestInstallDir "patch.ps1.new") "No staged patch.ps1.new left behind"
+Write-Host ""
+
+# --- Test 10: Another process holds the self-update mutex ---
+Write-Host "Test 10: Concurrent self-update is skipped while another run holds the mutex"
+Reset-InstallDir
+"v0.0.1" | Set-Content (Join-Path $TestInstallDir "VERSION") -NoNewline
+$env:GEMINI_INSTALL_DIR = $TestInstallDir
+$mutexName = & {
+    . (Join-Path $TestInstallDir "patch.ps1") help *> $null
+    Get-SelfUpdateMutexName
+}
+Remove-Item Env:\GEMINI_INSTALL_DIR -ErrorAction SilentlyContinue
+$heldMarker = Join-Path $TestInstallDir "mutex-held"
+$holderScript = @"
+`$m = New-Object System.Threading.Mutex(`$false, '$mutexName')
+[void]`$m.WaitOne()
+'held' | Set-Content -LiteralPath '$($heldMarker -replace "'","''")'
+Start-Sleep -Seconds 60
+"@
+$holder = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList @(
+    "-NoProfile", "-EncodedCommand",
+    [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($holderScript))
+)
+$deadline = (Get-Date).AddSeconds(15)
+while (-not (Test-Path $heldMarker) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+Start-FixtureServer (Join-Path $Fixtures "newer")
+Invoke-PatchRun
+Stop-FixtureServer
+Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+Assert-FileExists $heldMarker "Helper process acquired the mutex"
+Assert-FileContent (Join-Path $TestInstallDir "VERSION") "v0.0.1" "VERSION unchanged while another run holds the mutex"
+Assert-Contains $TestLogFile "another self-update is already in progress" "Log explains the skipped update"
+Write-Host ""
+
+# --- Test 11: Update proceeds once the mutex holder is gone ---
+Write-Host "Test 11: Self-update proceeds after the mutex holder died"
+Remove-Item (Join-Path $TestInstallDir "last-update-check") -ErrorAction SilentlyContinue
+"" | Set-Content $TestLogFile
+Start-FixtureServer (Join-Path $Fixtures "newer")
+Invoke-PatchRun
+Stop-FixtureServer
+Assert-FileContent (Join-Path $TestInstallDir "VERSION") "v99.0.0" "VERSION updated after the holder exited"
+Assert-NotContains $TestLogFile "Self-update failed" "No self-update failure logged"
 Write-Host ""
 
 # === Cleanup & Results ===

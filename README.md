@@ -173,6 +173,35 @@ gemini-chrome-fix
 
 That keeps the recovery path predictable and gives you a stable manual escape hatch even if automatic reconciliation cannot converge.
 
+## Troubleshooting: antivirus false positives (Windows)
+
+Some antivirus products flag `patch.ps1` by heuristics. Huorong (火绒) has reported it as `HEUR:TrojanDownloader/PS.NetLoader.av`, and Windows Defender may do the same. `patch.ps1` downloads the upstream Gemini-in-Chrome installer and its own updates, which is what the heuristic reacts to. This is a false positive.
+
+Symptoms:
+
+- `gemini-chrome-fix` or `gemini-chrome-status` prints `patch.ps1 not found at ... It was likely quarantined by antivirus`. Profiles from older releases show PowerShell's `The term '...\patch.ps1' is not recognized` error instead.
+- Auto-repair silently stops after Chrome updates.
+- The log (`%LOCALAPPDATA%\gemini-chrome-autoinstall.log`) has a `launcher: patch.ps1 not found at ...` line, or `Self-update aborted: downloaded patch.ps1 is missing or empty`.
+
+Fix:
+
+1. Restore `patch.ps1` from the antivirus quarantine, or skip this and reinstall in step 3.
+2. Add the install directory `%USERPROFILE%\.gemini-chrome-autoinstall\` to the antivirus trust list (Huorong: Trust Zone; Windows Defender: Virus & threat protection > Exclusions). Self-update writes new files there, so trust the whole directory, not just one file.
+3. Reinstall from PowerShell:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/Adonis0123/gemini-chrome-autoinstall/master/install.ps1 | iex
+   ```
+
+4. Run `gemini-chrome-status` to confirm.
+5. Report the false positive to the vendor so later versions are not flagged again: Huorong through its false-positive feedback, Microsoft at <https://www.microsoft.com/wdsi/filesubmission>.
+
+If `gemini-chrome-status` shows `Legacy task: PRESENT`, an old release left the `GeminiChromeAutoPatch` scheduled task behind, and every logon runs the startup check twice. Remove it from an elevated PowerShell:
+
+```powershell
+schtasks /delete /tn GeminiChromeAutoPatch /f
+```
+
 ## Logs
 
 | Platform | Path |

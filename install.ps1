@@ -101,6 +101,47 @@ function Download-OrCopy {
     }
 }
 
+function Read-ProfileText {
+    # Keep the profile's own encoding: BOM if present, otherwise the
+    # encoding this PowerShell uses for BOM-less scripts (ANSI on 5.1,
+    # UTF-8 on 7+). Rewriting it as anything else would garble non-ASCII
+    # content the user already has there.
+    param([string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $encoding = [System.Text.Encoding]::Default
+    $skip = 0
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $encoding = New-Object System.Text.UTF8Encoding($true); $skip = 3
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        $encoding = New-Object System.Text.UnicodeEncoding($false, $true); $skip = 2
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        $encoding = New-Object System.Text.UnicodeEncoding($true, $true); $skip = 2
+    }
+    return @{
+        Text = $encoding.GetString($bytes, $skip, $bytes.Length - $skip)
+        Encoding = $encoding
+    }
+}
+
+function Set-ProfileShortcut {
+    # Returns the updated profile text. An existing one-line definition of
+    # the function (what every earlier release appended) is rewritten in
+    # place, so re-running install upgrades old profiles and is a no-op on
+    # current ones. A multi-line definition the user wrote is left alone.
+    param([string]$Text, [string]$Name, [string]$Line)
+    $escapedName = [regex]::Escape($Name)
+    $oneLiner = "(?m)^[ \t]*function[ \t]+$escapedName[ \t]*\{.*\}[ \t]*(?=\r?$)"
+    if ([regex]::IsMatch($Text, $oneLiner)) {
+        return [regex]::Replace($Text, $oneLiner, $Line.Replace('$', '$$'))
+    }
+    if ([regex]::IsMatch($Text, "(?m)^[ \t]*function[ \t]+$escapedName\b")) {
+        Write-Host "Note: '$Name' in your PowerShell profile is not the one-line form; left unchanged."
+        return $Text
+    }
+    $newline = if ($Text.Contains("`r`n")) { "`r`n" } else { [Environment]::NewLine }
+    return $Text + $newline + $Line + $newline
+}
+
 Write-Host "Installing gemini-chrome-autoinstall..."
 Write-Host ""
 
@@ -202,34 +243,37 @@ if (-not $SkipFirstPatch) {
     }
 }
 
-# Register shortcut functions in PowerShell profile
+# Register shortcut functions in PowerShell profile. When antivirus has
+# quarantined patch.ps1, they explain that instead of PowerShell's
+# "not recognized as the name of a cmdlet" error.
 $patchScriptPath = Join-Path $InstallDir "patch.ps1"
-$fixFunc = "function gemini-chrome-fix { & `"$patchScriptPath`" manual }"
-$statusFunc = "function gemini-chrome-status { & `"$patchScriptPath`" status }"
+$missingHint = "patch.ps1 not found at $patchScriptPath. It was likely quarantined by antivirus (e.g. Huorong / Windows Defender false positive). Restore it from quarantine and add $InstallDir to the antivirus trust list, or reinstall: irm https://raw.githubusercontent.com/$Repo/$Branch/install.ps1 | iex"
+$quotedPath = "'" + $patchScriptPath.Replace("'", "''") + "'"
+$quotedHint = "'" + $missingHint.Replace("'", "''") + "'"
+$fixBody = "`$p = $quotedPath; if (Test-Path -LiteralPath `$p) { & `$p manual } else { Write-Warning $quotedHint }"
+$statusBody = "`$p = $quotedPath; if (Test-Path -LiteralPath `$p) { & `$p status } else { Write-Warning $quotedHint }"
+$fixFunc = "function gemini-chrome-fix { $fixBody }"
+$statusFunc = "function gemini-chrome-status { $statusBody }"
 
 if (!(Test-Path $ProfilePath)) {
     New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
 }
 
-$profileContent = Get-Content $ProfilePath -Raw -ErrorAction SilentlyContinue
-if (!$profileContent) { $profileContent = "" }
+$profileFile = Read-ProfileText -Path $ProfilePath
+$profileContent = Set-ProfileShortcut -Text $profileFile.Text -Name "gemini-chrome-fix" -Line $fixFunc
+$profileContent = Set-ProfileShortcut -Text $profileContent -Name "gemini-chrome-status" -Line $statusFunc
 
-$changed = $false
-if ($profileContent -notmatch 'function gemini-chrome-fix') {
-    Add-Content $ProfilePath "`n$fixFunc"
-    $changed = $true
-}
-if ($profileContent -notmatch 'function gemini-chrome-status') {
-    Add-Content $ProfilePath "`n$statusFunc"
-    $changed = $true
+$changed = $profileContent -cne $profileFile.Text
+if ($changed) {
+    [System.IO.File]::WriteAllText($ProfilePath, $profileContent, $profileFile.Encoding)
 }
 
 # Make shortcuts available in current session immediately
-Set-Item -Path "function:global:gemini-chrome-fix" -Value { & "$patchScriptPath" manual }.GetNewClosure()
-Set-Item -Path "function:global:gemini-chrome-status" -Value { & "$patchScriptPath" status }.GetNewClosure()
+Set-Item -Path "function:global:gemini-chrome-fix" -Value ([scriptblock]::Create($fixBody))
+Set-Item -Path "function:global:gemini-chrome-status" -Value ([scriptblock]::Create($statusBody))
 
 if ($changed) {
-    Write-Host "Shortcut functions added to PowerShell profile."
+    Write-Host "Shortcut functions added or updated in PowerShell profile."
     Write-Host "  gemini-chrome-fix     -> manual reinstall"
     Write-Host "  gemini-chrome-status  -> check status"
 } else {

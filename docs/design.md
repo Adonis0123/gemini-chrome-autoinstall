@@ -153,6 +153,8 @@ Windows uses a login startup entry plus a background registry watcher.
 
 - Run key: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\GeminiChromeAutoPatch`
 - Startup command: `patch.ps1 scheduled`
+- Legacy: older releases registered a `GeminiChromeAutoPatch` scheduled task that also runs `scheduled`. `enable`, `disable` and `scheduled` try to delete it; if it survives (deletion may need admin), they log the `schtasks /delete` command and `status` shows `Legacy task: PRESENT`.
+- `launcher.vbs` checks that `patch.ps1` exists before starting PowerShell. If antivirus quarantined it, the launcher logs that with the reinstall command and exits instead of failing invisibly.
 
 ### Chrome version detection
 
@@ -257,7 +259,7 @@ Common fields:
 - Pending age
 - Last attempt
 
-Windows also keeps startup-entry and watcher-process visibility. macOS also shows fallback-agent availability.
+Windows also keeps startup-entry and watcher-process visibility, plus a `Legacy task` line when the old scheduled task still exists. macOS also shows fallback-agent availability.
 
 ## 13. Manual Recovery
 

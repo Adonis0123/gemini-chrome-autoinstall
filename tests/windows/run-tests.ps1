@@ -811,6 +811,190 @@ public sealed class GeminiChromeProcessProbe : IDisposable
     Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: unknown"
   } -CaseEnv $seedNoZstdEnv
 
+  # launcher.vbs must not silently launch PowerShell against a patch.ps1
+  # that antivirus quarantined; it logs the reason and the fix instead.
+  $launcherMissingCaseRoot = Join-Path $RunRoot "launcher-logs-missing-patch"
+  $launcherMissingEnv = @{
+    "USERPROFILE" = Join-Path $launcherMissingCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $launcherMissingCaseRoot "localappdata"
+    "TEMP" = Join-Path $launcherMissingCaseRoot "temp"
+    "TMP" = Join-Path $launcherMissingCaseRoot "temp"
+    "TMPDIR" = Join-Path $launcherMissingCaseRoot "temp"
+  }
+  Invoke-Case "launcher-logs-missing-patch" {
+    $launcherDir = Join-Path $launcherMissingCaseRoot "install"
+    New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
+    Copy-Item (Join-Path $RepoRoot "launcher.vbs") (Join-Path $launcherDir "launcher.vbs") -Force
+    & cscript.exe //nologo (Join-Path $launcherDir "launcher.vbs") scheduled | Out-Null
+    if ($LASTEXITCODE -ne 1) {
+      Write-Host "[FAIL] launcher.vbs exit code was $LASTEXITCODE; expected 1 when patch.ps1 is missing"
+      $global:Failures++
+    }
+    else {
+      Write-Host "[PASS] launcher.vbs exits 1 when patch.ps1 is missing"
+    }
+    $launcherLog = Join-Path $launcherMissingCaseRoot "localappdata\gemini-chrome-autoinstall.log"
+    Assert-FileContains $launcherLog "launcher: patch.ps1 not found at "
+    Assert-FileContains $launcherLog "quarantined by antivirus"
+    Assert-FileContains $launcherLog "install.ps1 | iex"
+    $logLine = (Get-Content -Path $launcherLog | Select-Object -Last 1)
+    if ($logLine -match '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ') {
+      Write-Host "[PASS] launcher log line uses the [yyyy-MM-dd HH:mm:ss] format"
+    }
+    else {
+      Write-Host "[FAIL] launcher log line has an unexpected format: $logLine"
+      $global:Failures++
+    }
+  } -CaseEnv $launcherMissingEnv
+
+  # Older releases appended one-line profile functions that fail with
+  # "not recognized" once patch.ps1 is quarantined. install.ps1 must
+  # upgrade them in place, keep the rest of the profile, stay idempotent,
+  # and the upgraded functions must explain a missing patch.ps1.
+  $profileUpgradeCaseRoot = Join-Path $RunRoot "install-upgrades-profile-shortcuts"
+  $profileUpgradeEnv = @{
+    "USERPROFILE" = Join-Path $profileUpgradeCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $profileUpgradeCaseRoot "localappdata"
+    "TEMP" = Join-Path $profileUpgradeCaseRoot "temp"
+    "TMP" = Join-Path $profileUpgradeCaseRoot "temp"
+    "TMPDIR" = Join-Path $profileUpgradeCaseRoot "temp"
+  }
+  Invoke-Case "install-upgrades-profile-shortcuts" {
+    $installRoot = Join-Path $profileUpgradeCaseRoot "install"
+    $profilePath = Join-Path $profileUpgradeCaseRoot "profile.ps1"
+    $oldPatchPath = Join-Path $installRoot "patch.ps1"
+    $userLine = "Set-Alias ll Get-ChildItem # " + [char]0x4E2D + [char]0x6587
+    $oldProfile = "$userLine`r`nfunction gemini-chrome-fix { & `"$oldPatchPath`" manual }`r`n`r`nfunction gemini-chrome-status { & `"$oldPatchPath`" status }`r`n"
+    [System.IO.File]::WriteAllText($profilePath, $oldProfile, (New-Object System.Text.UTF8Encoding($true)))
+
+    $env:GEMINI_INSTALL_DIR = $installRoot
+    $env:GEMINI_PROFILE_PATH = $profilePath
+    $env:GEMINI_SKIP_ENABLE = "1"
+    $env:GEMINI_SKIP_FIRST_PATCH = "1"
+    & "$RepoRoot\install.ps1" *> (Join-Path $profileUpgradeCaseRoot "install1.txt")
+    if (-not $?) { throw "install.ps1 failed (first run)" }
+
+    $profileText = [System.IO.File]::ReadAllText($profilePath)
+    Assert-Contains $profileText $userLine
+    Assert-Contains $profileText "Test-Path -LiteralPath"
+    Assert-Contains $profileText "quarantined by antivirus"
+    if ($profileText.Contains("{ & `"$oldPatchPath`" manual }")) {
+      Write-Host "[FAIL] old gemini-chrome-fix one-liner is still in the profile"
+      $global:Failures++
+    }
+    else {
+      Write-Host "[PASS] old gemini-chrome-fix one-liner was replaced"
+    }
+    $fixCount = ([regex]::Matches($profileText, 'function gemini-chrome-fix')).Count
+    $statusCount = ([regex]::Matches($profileText, 'function gemini-chrome-status')).Count
+    if ($fixCount -eq 1 -and $statusCount -eq 1) {
+      Write-Host "[PASS] profile defines each shortcut exactly once"
+    }
+    else {
+      Write-Host "[FAIL] profile defines gemini-chrome-fix $fixCount times and gemini-chrome-status $statusCount times; expected 1 each"
+      $global:Failures++
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($profilePath)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+      Write-Host "[PASS] profile keeps its UTF-8 BOM"
+    }
+    else {
+      Write-Host "[FAIL] profile lost its UTF-8 BOM"
+      $global:Failures++
+    }
+
+    $hashAfterFirst = (Get-FileHash $profilePath).Hash
+    & "$RepoRoot\install.ps1" *> (Join-Path $profileUpgradeCaseRoot "install2.txt")
+    if (-not $?) { throw "install.ps1 failed (second run)" }
+    if ((Get-FileHash $profilePath).Hash -eq $hashAfterFirst) {
+      Write-Host "[PASS] re-running install leaves the profile unchanged"
+    }
+    else {
+      Write-Host "[FAIL] re-running install changed the profile again"
+      $global:Failures++
+    }
+
+    Remove-Item -LiteralPath $oldPatchPath -Force
+    $fixOutput = & {
+      . $profilePath
+      gemini-chrome-fix
+      gemini-chrome-status
+    } *>&1 | ForEach-Object { "$_" } | Out-String -Width 4096
+    Assert-Contains $fixOutput "patch.ps1 not found at $oldPatchPath"
+    Assert-Contains $fixOutput "install.ps1 | iex"
+    if ($fixOutput -match 'is not recognized') {
+      Write-Host "[FAIL] shortcut still surfaces PowerShell's CommandNotFound error"
+      $global:Failures++
+    }
+    else {
+      Write-Host "[PASS] shortcut does not surface CommandNotFound"
+    }
+  } -CaseEnv $profileUpgradeEnv
+
+  # The legacy GeminiChromeAutoPatch scheduled task makes every logon run
+  # 'scheduled' twice. Mock schtasks via the wrapper functions so the test
+  # never touches the real Task Scheduler or HKCU Run key.
+  $legacyTaskCaseRoot = Join-Path $RunRoot "legacy-task-surfaced"
+  $legacyTaskRuntimeRoot = Join-Path $legacyTaskCaseRoot "runtime"
+  $legacyTaskEnv = @{
+    "USERPROFILE" = Join-Path $legacyTaskCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $legacyTaskCaseRoot "localappdata"
+    "TEMP" = Join-Path $legacyTaskCaseRoot "temp"
+    "TMP" = Join-Path $legacyTaskCaseRoot "temp"
+    "TMPDIR" = Join-Path $legacyTaskCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $legacyTaskRuntimeRoot
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+    "GEMINI_CHROME_RUNNING" = "0"
+  }
+  Invoke-Case "legacy-task-surfaced" {
+    New-Item -ItemType Directory -Force -Path $legacyTaskRuntimeRoot | Out-Null
+    $legacyLog = Join-Path $legacyTaskCaseRoot "localappdata\gemini-chrome-autoinstall.log"
+    & {
+      . "$RepoRoot\patch.ps1" help *> $null
+
+      # Deletion keeps failing: the task survives.
+      function Test-LegacyScheduledTask { return $true }
+      function Invoke-LegacyTaskDelete { }
+      $removed = Remove-LegacyScheduledTask
+      if ($removed -eq $false) {
+        Write-Host "[PASS] Remove-LegacyScheduledTask reports a surviving task"
+      }
+      else {
+        Write-Host "[FAIL] Remove-LegacyScheduledTask returned '$removed' for a surviving task"
+        $global:Failures++
+      }
+      Assert-FileContains $legacyLog "legacy scheduled task 'GeminiChromeAutoPatch' still exists"
+      Assert-FileContains $legacyLog "schtasks /delete /tn GeminiChromeAutoPatch /f"
+
+      $statusOutput = Invoke-Status *>&1 | ForEach-Object { "$_" } | Out-String -Width 4096
+      Assert-Contains $statusOutput "Legacy task:  PRESENT"
+      Assert-Contains $statusOutput "schtasks /delete /tn GeminiChromeAutoPatch /f"
+
+      # Deletion succeeds: the task is gone and status stays quiet.
+      $script:legacyDeleted = $false
+      function Test-LegacyScheduledTask { return (-not $script:legacyDeleted) }
+      function Invoke-LegacyTaskDelete { $script:legacyDeleted = $true }
+      $removed = Remove-LegacyScheduledTask
+      if ($removed -eq $true) {
+        Write-Host "[PASS] Remove-LegacyScheduledTask reports a removed task"
+      }
+      else {
+        Write-Host "[FAIL] Remove-LegacyScheduledTask returned '$removed' after a successful delete"
+        $global:Failures++
+      }
+      Assert-FileContains $legacyLog "Removed legacy scheduled task 'GeminiChromeAutoPatch'."
+      $statusOutput = Invoke-Status *>&1 | ForEach-Object { "$_" } | Out-String -Width 4096
+      if ($statusOutput.Contains("Legacy task:")) {
+        Write-Host "[FAIL] status still reports a legacy task after it was removed"
+        $global:Failures++
+      }
+      else {
+        Write-Host "[PASS] status omits the legacy task line once it is gone"
+      }
+    }
+  } -CaseEnv $legacyTaskEnv
+
   if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
     Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"
     exit 1

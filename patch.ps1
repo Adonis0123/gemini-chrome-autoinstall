@@ -42,6 +42,8 @@ $script:NeedsPatchChromeVersion = $null
 $Repo = "Adonis0123/gemini-chrome-autoinstall"
 $Branch = "master"
 $RawBase = if ($env:GEMINI_RAW_BASE) { $env:GEMINI_RAW_BASE } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
+$ReinstallCommand = "irm https://raw.githubusercontent.com/$Repo/$Branch/install.ps1 | iex"
+$LegacyTaskDeleteCommand = "schtasks /delete /tn $TaskName /f"
 
 function Write-Log {
     param([string]$Message)
@@ -756,6 +758,42 @@ function Invoke-PendingInstall {
     [void](Invoke-Reconcile -Trigger "retry")
 }
 
+function Test-LegacyScheduledTask {
+    # Older releases registered a logon scheduled task that also runs
+    # 'patch.ps1 scheduled'. While it survives, every logon runs scheduled
+    # twice (Run key + task).
+    # Under EAP=Stop, Windows PowerShell 5.1 turns redirected native stderr
+    # ("task not found") into a terminating error, so relax it locally and
+    # rely on the exit code instead.
+    $ErrorActionPreference = "Continue"
+    try {
+        & schtasks.exe /query /tn $TaskName 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $true }
+    } catch {}
+    # Fallback for a task whose ACL hides it from schtasks /query.
+    $treeKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\$TaskName"
+    return [bool](Test-Path -Path $treeKey -ErrorAction SilentlyContinue)
+}
+
+function Invoke-LegacyTaskDelete {
+    $ErrorActionPreference = "Continue"
+    try { & schtasks.exe /delete /tn $TaskName /f 2>&1 | Out-Null } catch {}
+}
+
+function Remove-LegacyScheduledTask {
+    # Returns $true when the legacy task is gone (or never existed). When it
+    # survives (deleting it may need an elevated shell), log why it matters
+    # and how to remove it instead of failing silently.
+    if (-not (Test-LegacyScheduledTask)) { return $true }
+    Invoke-LegacyTaskDelete
+    if (-not (Test-LegacyScheduledTask)) {
+        Write-Log "Removed legacy scheduled task '$TaskName'."
+        return $true
+    }
+    Write-Log "Warning: legacy scheduled task '$TaskName' still exists, so 'patch.ps1 scheduled' runs twice at logon. Remove it manually (an elevated PowerShell may be required): $LegacyTaskDeleteCommand"
+    return $false
+}
+
 function Invoke-Enable {
     $launcherVbs = Join-Path $InstallDir "launcher.vbs"
     if (-not (Test-Path $launcherVbs)) {
@@ -766,8 +804,9 @@ function Invoke-Enable {
 
     $taskCommand = "wscript.exe `"$launcherVbs`" scheduled"
 
-    # Remove legacy scheduled task if it exists (ignore errors - may need admin)
-    try { schtasks /delete /tn $TaskName /f 2>&1 | Out-Null } catch {}
+    if (-not (Remove-LegacyScheduledTask)) {
+        Write-Host "Warning: legacy scheduled task '$TaskName' could not be removed. Run: $LegacyTaskDeleteCommand"
+    }
 
     # Register via HKCU Run key (no admin required)
     try {
@@ -852,8 +891,9 @@ function Stop-WatchProcess {
 function Invoke-Disable {
     Stop-WatchProcess
 
-    # Remove legacy scheduled task if it exists (ignore errors - may need admin)
-    try { schtasks /delete /tn $TaskName /f 2>&1 | Out-Null } catch {}
+    if (-not (Remove-LegacyScheduledTask)) {
+        Write-Host "Warning: legacy scheduled task '$TaskName' could not be removed. Run: $LegacyTaskDeleteCommand"
+    }
 
     # Remove registry Run key
     $existing = Get-ItemProperty -Path $RunRegPath -Name $RunRegName -ErrorAction SilentlyContinue
@@ -884,6 +924,11 @@ function Invoke-Status {
         Write-Host "  Watcher:      RUNNING (PID $($watcherProc.Id))"
     } else {
         Write-Host "  Watcher:      not running"
+    }
+
+    if (Test-LegacyScheduledTask) {
+        Write-Host "  Legacy task:  PRESENT ('$TaskName' runs 'scheduled' a second time at logon)"
+        Write-Host "                Remove it (an elevated PowerShell may be required): $LegacyTaskDeleteCommand"
     }
 
     $chromeVer = Get-ChromeVersionOrUnknown
@@ -939,6 +984,31 @@ function Invoke-Uninstall {
     Write-Host "Done. gemini-chrome-autoinstall has been completely removed."
 }
 
+function Test-UsableFile {
+    # Antivirus can quarantine (delete or truncate) a file right after it is
+    # written, so check it is still there and non-empty before relying on it.
+    param([string]$Path)
+    try {
+        $info = New-Object System.IO.FileInfo($Path)
+        return ($info.Exists -and $info.Length -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Get-SelfUpdateMutexName {
+    # Scoped to this install dir so a dev checkout's test runs never block
+    # (or get blocked by) the real install.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($InstallDir.ToLowerInvariant()))
+    } finally {
+        $sha.Dispose()
+    }
+    $hex = ([System.BitConverter]::ToString($hash) -replace '-', '').Substring(0, 16)
+    return "Local\GeminiChromeAutoInstall.SelfUpdate.$hex"
+}
+
 function Update-Self {
     param(
         # Set by Invoke-Scheduled, which always starts a fresh watcher
@@ -951,6 +1021,43 @@ function Update-Self {
 
     # Test suites set this to bypass network calls and file overwrites.
     if ($env:GEMINI_SKIP_SELF_UPDATE -eq "1") { return }
+
+    # Two 'scheduled' runs can start at the same logon (e.g. Run key plus a
+    # leftover legacy scheduled task). Only one may self-update; the other
+    # skips, and the winner's cooldown timestamp covers the next 24h.
+    $mutex = $null
+    $acquired = $false
+    try {
+        $mutex = New-Object System.Threading.Mutex($false, (Get-SelfUpdateMutexName))
+        try {
+            $acquired = $mutex.WaitOne(0)
+        } catch {
+            # AbandonedMutexException: the previous holder died mid-update
+            # and we own the mutex now. PowerShell wraps it, so unwrap.
+            if ($_.Exception.GetBaseException() -is [System.Threading.AbandonedMutexException]) {
+                $acquired = $true
+            } else {
+                throw
+            }
+        }
+        if (-not $acquired) {
+            Write-Log "Self-update skipped: another self-update is already in progress."
+            return
+        }
+        Invoke-SelfUpdate -StopWatcherAfterUpdate:$StopWatcherAfterUpdate
+    } catch {
+        # Self-update must never block the core patch logic.
+        Write-Log "Self-update failed: $($_.Exception.Message)"
+    } finally {
+        if ($acquired) {
+            try { $mutex.ReleaseMutex() } catch {}
+        }
+        if ($mutex) { $mutex.Dispose() }
+    }
+}
+
+function Invoke-SelfUpdate {
+    param([switch]$StopWatcherAfterUpdate)
 
     $checkFile = Join-Path $InstallDir "last-update-check"
     $now = [int](Get-Date -UFormat %s)
@@ -977,22 +1084,71 @@ function Update-Self {
 
     if ($remoteVer -eq $localVer) { return }
 
-    # Download to temp, then move
-    $tmp = Join-Path $env:TEMP "gemini-self-update"
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    # Download into a per-process temp dir: a shared fixed path let two
+    # concurrent runs, or leftovers from an interrupted run, mix files.
+    $tmp = Join-Path $env:TEMP ("gemini-self-update-$PID-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    # VERSION goes last: if the swap stops halfway, the old VERSION keeps
+    # the update eligible for the next check.
+    $updateFiles = @("patch.ps1", "launcher.vbs", "VERSION")
+    $stagedFiles = @()
     try {
-        Invoke-WebRequest -Uri "$RawBase/patch.ps1"    -OutFile "$tmp\patch.ps1"    -TimeoutSec 10 -UseBasicParsing
-        Invoke-WebRequest -Uri "$RawBase/launcher.vbs" -OutFile "$tmp\launcher.vbs" -TimeoutSec 5  -UseBasicParsing
-        Invoke-WebRequest -Uri "$RawBase/VERSION"      -OutFile "$tmp\VERSION"      -TimeoutSec 5  -UseBasicParsing
-    } catch {
-        Write-Log "Self-update download failed: $_"
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        return
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        try {
+            Invoke-WebRequest -Uri "$RawBase/patch.ps1"    -OutFile "$tmp\patch.ps1"    -TimeoutSec 10 -UseBasicParsing
+            Invoke-WebRequest -Uri "$RawBase/launcher.vbs" -OutFile "$tmp\launcher.vbs" -TimeoutSec 5  -UseBasicParsing
+            Invoke-WebRequest -Uri "$RawBase/VERSION"      -OutFile "$tmp\VERSION"      -TimeoutSec 5  -UseBasicParsing
+        } catch {
+            Write-Log "Self-update download failed: $_"
+            return
+        }
+
+        # Stage every file next to its destination (same volume, so the
+        # swap below is a rename) and verify all of them before touching
+        # any installed file. A file that vanished or is empty was most
+        # likely quarantined by antivirus: abort and keep the old files.
+        foreach ($name in $updateFiles) {
+            $downloaded = Join-Path $tmp $name
+            $staged = Join-Path $InstallDir "$name.new"
+            if (-not (Test-UsableFile $downloaded)) {
+                Write-Log "Self-update aborted: downloaded $name is missing or empty (possibly quarantined by antivirus). Keeping the installed $localVer files. If the installed patch.ps1 disappears too, add $InstallDir to the antivirus trust list and reinstall: $ReinstallCommand"
+                return
+            }
+            try {
+                $stagedFiles += $staged
+                Copy-Item -LiteralPath $downloaded -Destination $staged -Force
+            } catch {
+                Write-Log "Self-update aborted: could not stage ${name}: $($_.Exception.Message). Keeping the installed $localVer files."
+                return
+            }
+            if (-not (Test-UsableFile $staged)) {
+                Write-Log "Self-update aborted: staged $name is missing or empty (possibly quarantined by antivirus). Keeping the installed $localVer files. If the installed patch.ps1 disappears too, add $InstallDir to the antivirus trust list and reinstall: $ReinstallCommand"
+                return
+            }
+        }
+
+        # Swap the staged files in. File.Replace / File.Move never leave the
+        # destination missing. Move-Item -Force on Windows PowerShell 5.1
+        # deletes the destination first, so a failed move lost the file.
+        foreach ($name in $updateFiles) {
+            $dest = Join-Path $InstallDir $name
+            $staged = Join-Path $InstallDir "$name.new"
+            try {
+                if (Test-Path -LiteralPath $dest) {
+                    [System.IO.File]::Replace($staged, $dest, [System.Management.Automation.Language.NullString]::Value)
+                } else {
+                    [System.IO.File]::Move($staged, $dest)
+                }
+            } catch {
+                Write-Log "Self-update aborted while replacing ${name}: $($_.Exception.Message). Files not yet replaced keep version $localVer; the update is retried on the next check."
+                return
+            }
+        }
+    } finally {
+        foreach ($staged in $stagedFiles) {
+            Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Move-Item "$tmp\patch.ps1"    (Join-Path $InstallDir "patch.ps1")    -Force
-    Move-Item "$tmp\launcher.vbs" (Join-Path $InstallDir "launcher.vbs") -Force
-    Move-Item "$tmp\VERSION"      (Join-Path $InstallDir "VERSION")      -Force
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Write-Log "Self-updated from $localVer to $remoteVer"
 
     # The watcher is a long-lived daemon that loaded the old code into
@@ -1336,6 +1492,7 @@ function Invoke-Scheduled {
     # spawn block below brings up a new one on the new code.
     Update-Self -StopWatcherAfterUpdate
     Write-Log "Scheduled entry triggered."
+    [void](Remove-LegacyScheduledTask)
 
     [void](Invoke-Reconcile -Trigger "startup")
 

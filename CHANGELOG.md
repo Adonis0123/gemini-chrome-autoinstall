@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- *(windows)* Restart the watcher after a tool version change([abdd095](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/abdd0958bca766ca8e35918373fbfb3af40ec595))
+## [0.6.7] - 2026-11-11
+
+### Bug Fixes
+
 - Reopen Chrome only after the in-progress patch finishes([06a51ba](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/06a51babbac78bba3df7db57b4ed277df5103d88))
 ## [0.6.6] - 2026-11-11
 

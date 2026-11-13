@@ -107,7 +107,7 @@ Windows uses a login startup entry plus a background registry watcher.
 - Background watcher command: `patch.ps1 watch`
 - Startup entrypoint: `patch.ps1 scheduled`
 
-The watcher treats version changes as a signal to reconcile, not as proof that patching is needed. `Local State` remains the final health check.
+The watcher treats version changes as a signal to reconcile, not as proof that patching is needed. `Local State` remains the final health check. If the installed tool version changes while the watcher is running, it starts a new watcher before exiting.
 
 ## Status Output
 

@@ -61,7 +61,10 @@ function Invoke-Case {
     "GEMINI_ZSTD_PATH",
     "GEMINI_ASSUME_CHROME_CLOSE",
     "GEMINI_CHROME_START_LOG",
-    "GEMINI_LOCK_WAIT_SECONDS"
+    "GEMINI_LOCK_WAIT_SECONDS",
+    "GEMINI_WATCH_SIMULATE_TIMEOUT",
+    "GEMINI_WATCH_STARTUP_VERSION",
+    "GEMINI_WATCH_START_LOG"
   )
 
   $originalEnv = @{}
@@ -1070,6 +1073,81 @@ public sealed class GeminiChromeProcessProbe : IDisposable
       }
     }
   } -CaseEnv $legacyTaskEnv
+
+  # A tool-version change used to log "Exiting so a fresh watcher can start"
+  # and then wait for the next login. Chrome can refetch a cn seed in that gap.
+  $watchRestartCaseRoot = Join-Path $RunRoot "watch-restarts-when-tool-version-changes"
+  $watchRestartInstall = Join-Path $watchRestartCaseRoot "runtime"
+  $watchRestartStartLog = Join-Path $watchRestartCaseRoot "watch-start.txt"
+  $watchRestartEnv = @{
+    "USERPROFILE" = Join-Path $watchRestartCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $watchRestartCaseRoot "localappdata"
+    "TEMP" = Join-Path $watchRestartCaseRoot "temp"
+    "TMP" = Join-Path $watchRestartCaseRoot "temp"
+    "TMPDIR" = Join-Path $watchRestartCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $watchRestartInstall
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "157.0.8103.52"
+    "GEMINI_CHROME_RUNNING" = "0"
+    "GEMINI_WATCH_SIMULATE_TIMEOUT" = "1"
+    "GEMINI_WATCH_STARTUP_VERSION" = "v0.6.6"
+    "GEMINI_WATCH_START_LOG" = $watchRestartStartLog
+  }
+  Invoke-Case "watch-restarts-when-tool-version-changes" {
+    New-Item -ItemType Directory -Force -Path $watchRestartInstall | Out-Null
+    Set-Content -Path (Join-Path $watchRestartInstall "VERSION") -Value "v0.6.7" -NoNewline
+    & "$RepoRoot\patch.ps1" watch | Out-Null
+    if (-not $?) { throw "patch.ps1 watch failed in watch-restarts-when-tool-version-changes" }
+    $watchLog = Join-Path $watchRestartCaseRoot "localappdata\gemini-chrome-autoinstall.log"
+    Assert-FileContains $watchLog "Restarting watcher on the new code."
+    Assert-FileContains $watchLog "v0.6.6 -> v0.6.7"
+    Assert-FileMissing (Join-Path $watchRestartInstall "watcher.pid")
+    Assert-FileContains $watchRestartStartLog "watch"
+    $restartLogText = Get-Content -Path $watchLog -Raw
+    if ($restartLogText.Contains("already running")) {
+      Write-Host "[FAIL] replacement was skipped because watcher.pid was still live"
+      $global:Failures++
+    }
+    else {
+      Write-Host "[PASS] replacement started after watcher.pid was cleared"
+    }
+  } -CaseEnv $watchRestartEnv
+
+  $watchSameCaseRoot = Join-Path $RunRoot "watch-does-not-restart-when-tool-version-matches"
+  $watchSameInstall = Join-Path $watchSameCaseRoot "runtime"
+  $watchSameStartLog = Join-Path $watchSameCaseRoot "watch-start.txt"
+  $watchSameEnv = @{
+    "USERPROFILE" = Join-Path $watchSameCaseRoot "home"
+    "LOCALAPPDATA" = Join-Path $watchSameCaseRoot "localappdata"
+    "TEMP" = Join-Path $watchSameCaseRoot "temp"
+    "TMP" = Join-Path $watchSameCaseRoot "temp"
+    "TMPDIR" = Join-Path $watchSameCaseRoot "temp"
+    "GEMINI_INSTALL_DIR" = $watchSameInstall
+    "GEMINI_LOCAL_STATE_PATH" = Join-Path $FixtureDir "healthy.json"
+    "GEMINI_CHROME_VERSION" = "157.0.8103.52"
+    "GEMINI_CHROME_RUNNING" = "0"
+    "GEMINI_WATCH_SIMULATE_TIMEOUT" = "1"
+    "GEMINI_WATCH_STARTUP_VERSION" = "v0.6.7"
+    "GEMINI_WATCH_START_LOG" = $watchSameStartLog
+  }
+  Invoke-Case "watch-does-not-restart-when-tool-version-matches" {
+    New-Item -ItemType Directory -Force -Path $watchSameInstall | Out-Null
+    Set-Content -Path (Join-Path $watchSameInstall "VERSION") -Value "v0.6.7" -NoNewline
+    & "$RepoRoot\patch.ps1" watch | Out-Null
+    if (-not $?) { throw "patch.ps1 watch failed in watch-does-not-restart-when-tool-version-matches" }
+    $watchLog = Join-Path $watchSameCaseRoot "localappdata\gemini-chrome-autoinstall.log"
+    Assert-FileContains $watchLog "Watch stopped."
+    Assert-FileMissing (Join-Path $watchSameInstall "watcher.pid")
+    Assert-FileMissing $watchSameStartLog
+    $sameLogText = Get-Content -Path $watchLog -Raw
+    if ($sameLogText.Contains("Restarting watcher")) {
+      Write-Host "[FAIL] matching tool version still restarted the watcher"
+      $global:Failures++
+    }
+    else {
+      Write-Host "[PASS] matching tool version does not restart the watcher"
+    }
+  } -CaseEnv $watchSameEnv
 
   if ($RequestedCases.Count -gt 0 -and $CasesRun -eq 0) {
     Write-Host "[FAIL] unknown test case(s): $($RequestedCases -join ',')"

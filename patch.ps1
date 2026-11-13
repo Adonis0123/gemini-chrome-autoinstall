@@ -1151,14 +1151,11 @@ function Invoke-SelfUpdate {
     }
     Write-Log "Self-updated from $localVer to $remoteVer"
 
-    # The watcher is a long-lived daemon that loaded the old code into
-    # memory. Without stopping it, the old code keeps running until
-    # reboot/crash and bug fixes in the new version never take effect.
-    # Only do this when the caller guarantees a fresh watcher will be
-    # spawned immediately — Invoke-Scheduled does (see the spawn block
-    # right after its Update-Self call). Invoke-Run does NOT; for that
-    # path we rely on Invoke-Watch's version-mismatch self-exit to let
-    # the old watcher drain itself on its next timeout tick instead.
+    # The watcher keeps the code it loaded until the on-disk VERSION
+    # changes. It then exits and starts a replacement itself, so a
+    # mid-session update does not wait for the next login. Invoke-Scheduled
+    # still stops the old process here because it starts the replacement
+    # immediately. Invoke-Run does not; the watcher's next timeout tick does.
     if ($StopWatcherAfterUpdate) {
         Stop-WatchProcess
     }
@@ -1368,16 +1365,80 @@ function Test-WatcherRunning {
     return [bool](Get-ValidatedWatcherProcess)
 }
 
+function Start-WatchProcess {
+    # Refuse while watcher.pid still names a live watcher. The version-mismatch
+    # path deletes that file first; starting before the delete makes the new
+    # process see the old one and exit.
+    if (Test-WatcherRunning) {
+        Write-Log "Watch: replacement not started because a watcher is already running."
+        return
+    }
+
+    if ($env:GEMINI_WATCH_START_LOG) {
+        Add-Content -Path $env:GEMINI_WATCH_START_LOG -Value "watch" -Encoding ascii
+        return
+    }
+
+    $launcherVbs = Join-Path $InstallDir "launcher.vbs"
+    if (-not (Test-Path -LiteralPath $launcherVbs)) {
+        Write-Log "Watch: launcher.vbs not found at $launcherVbs. Not restarting."
+        return
+    }
+
+    Start-Process -FilePath "wscript.exe" `
+        -ArgumentList "`"$launcherVbs`" watch" `
+        -WindowStyle Hidden
+}
+
+function Test-WatchToolVersionStale {
+    param([string]$StartupVersion)
+
+    $currentVersion = Get-ToolVersion
+    if ($currentVersion -eq $StartupVersion) {
+        return $false
+    }
+
+    # Login is the only other spawn point, and it may be days away. Start
+    # the replacement in this process, after watcher.pid is removed.
+    Write-Log "Watch: on-disk version changed ($StartupVersion -> $currentVersion). Restarting watcher on the new code."
+    $script:WatchRespawnAfterExit = $true
+    return $true
+}
+
+function Complete-WatchExit {
+    param(
+        $RegistryKey,
+        $WaitEvent
+    )
+
+    if ($RegistryKey -and $RegistryKey -ne [IntPtr]::Zero) {
+        [RegistryWatcher]::RegCloseKey($RegistryKey) | Out-Null
+    }
+    if ($WaitEvent -and $WaitEvent -ne [IntPtr]::Zero) {
+        [RegistryWatcher]::CloseHandle($WaitEvent) | Out-Null
+    }
+    Remove-Item $WatcherPidFile -Force -ErrorAction SilentlyContinue
+    Write-Log "Watch stopped."
+    if ($script:WatchRespawnAfterExit) {
+        $script:WatchRespawnAfterExit = $false
+        Start-WatchProcess
+    }
+}
+
 function Invoke-Watch {
     if (Test-WatcherRunning) {
         Write-Log "Watch: another instance already running, exiting."
         return
     }
 
-    # Record the version we were started with. If the on-disk VERSION changes
-    # (self-update happened), we self-exit on the next timeout tick so the
-    # next Invoke-Scheduled can spawn a fresh watcher running the new code.
+    # Record the version we were started with. A later on-disk VERSION change
+    # means this process is running stale code. The timeout tick exits and
+    # starts a replacement; the next login is not required.
     $startupVersion = Get-ToolVersion
+    if ($env:GEMINI_WATCH_SIMULATE_TIMEOUT -eq "1" -and $env:GEMINI_WATCH_STARTUP_VERSION) {
+        $startupVersion = $env:GEMINI_WATCH_STARTUP_VERSION
+    }
+    $script:WatchRespawnAfterExit = $false
 
     # Write PID file as "<pid> <startTime.Ticks>" so Get-ValidatedWatcherProcess
     # can do an EXACT identity match against the live process. A reused PID
@@ -1387,6 +1448,16 @@ function Invoke-Watch {
     $selfProc = Get-Process -Id $PID -ErrorAction Stop
     "$PID $($selfProc.StartTime.Ticks)" | Set-Content $WatcherPidFile -NoNewline -Force
     Write-Log "Watch started: monitoring Google Update version changes (version $startupVersion)."
+
+    if ($env:GEMINI_WATCH_SIMULATE_TIMEOUT -eq "1") {
+        # Test-only: one timeout tick, no registry handle and no wait.
+        try {
+            [void](Test-WatchToolVersionStale -StartupVersion $startupVersion)
+        } finally {
+            Complete-WatchExit
+        }
+        return
+    }
 
     $currentVersion = Get-ChromeVersion
     if (-not $currentVersion) {
@@ -1519,13 +1590,10 @@ public class RegistryWatcher {
                     [void](Invoke-Reconcile -Trigger "watch")
                 }
             } elseif ($waitResult -eq [RegistryWatcher]::WAIT_TIMEOUT) {
-                # Defensive self-exit: if the on-disk tool version changed while
-                # we were sleeping, a self-update happened. Our in-memory code
-                # is now stale, so exit cleanly and let the next Invoke-Scheduled
-                # start a fresh watcher on the new code.
-                $currentVersion = Get-ToolVersion
-                if ($currentVersion -ne $startupVersion) {
-                    Write-Log "Watch: on-disk version changed ($startupVersion -> $currentVersion). Exiting so a fresh watcher can start."
+                # Self-update, or any other writer, may have replaced VERSION
+                # while this process kept the old code loaded. Exit and let
+                # Complete-WatchExit start a watcher on the new code.
+                if (Test-WatchToolVersionStale -StartupVersion $startupVersion) {
                     break
                 }
 
@@ -1560,14 +1628,7 @@ public class RegistryWatcher {
         }
     }
     finally {
-        if ($hKey -ne [IntPtr]::Zero) {
-            [RegistryWatcher]::RegCloseKey($hKey) | Out-Null
-        }
-        if ($hEvent -ne [IntPtr]::Zero) {
-            [RegistryWatcher]::CloseHandle($hEvent) | Out-Null
-        }
-        Remove-Item $WatcherPidFile -Force -ErrorAction SilentlyContinue
-        Write-Log "Watch stopped."
+        Complete-WatchExit -RegistryKey $hKey -WaitEvent $hEvent
     }
 }
 
@@ -1585,10 +1646,7 @@ function Invoke-Scheduled {
     # Ensure watch process is running
     if (-not (Test-WatcherRunning)) {
         Write-Log "Scheduled: starting watch process in background."
-        $launcherVbs = Join-Path $InstallDir "launcher.vbs"
-        Start-Process -FilePath "wscript.exe" `
-            -ArgumentList "`"$launcherVbs`" watch" `
-            -WindowStyle Hidden
+        Start-WatchProcess
     } else {
         Write-Log "Scheduled: watch process already running."
     }

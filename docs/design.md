@@ -181,6 +181,8 @@ The watcher auto-detects the correct registry hive at startup by probing the sam
 
 `watch` waits on registry change notifications and also wakes up on timeout so pending retries can continue without a separate scheduler.
 
+If `VERSION` changes while `watch` is running, that process removes `watcher.pid` and starts a new `watch` before it exits. The next login is not the respawn path. A watcher that only exits leaves Chrome free to refetch a `cn` variations seed with nobody recording `pending`.
+
 ## 8. Concurrency Control
 
 This system uses one concurrency primitive only:

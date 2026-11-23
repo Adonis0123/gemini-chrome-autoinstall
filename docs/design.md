@@ -46,6 +46,7 @@ trigger
 | Pending metadata | `~/.gemini-chrome-autoinstall/pending` |
 | Last healthy version | `~/.gemini-chrome-autoinstall/patched-version.txt` |
 | Last result metadata | `~/.gemini-chrome-autoinstall/last-result` |
+| Cached upstream install script | `~/.gemini-chrome-autoinstall/core-install.sh` |
 | Log | `~/Library/Logs/gemini-chrome-autoinstall.log` |
 | Active lock | `/tmp/gemini-chrome-autoinstall.active.lock/` |
 
@@ -57,6 +58,7 @@ trigger
 | Pending metadata | `%USERPROFILE%\.gemini-chrome-autoinstall\pending` |
 | Last healthy version | `%USERPROFILE%\.gemini-chrome-autoinstall\patched-version.txt` |
 | Last result metadata | `%USERPROFILE%\.gemini-chrome-autoinstall\last-result` |
+| Cached upstream install script | `%USERPROFILE%\.gemini-chrome-autoinstall\core-install.ps1` |
 | Log | `%LOCALAPPDATA%\gemini-chrome-autoinstall.log` |
 | Active lock | `%TEMP%\gemini-chrome-autoinstall.active.lock\` |
 
@@ -222,6 +224,16 @@ acquire active lock
   -> if healthy: save patched version, clear pending, record healthy
 release active lock
 ```
+
+### Upstream installer fetch (online first, cache fallback)
+
+`GEMINI_CORE_INSTALL_CMD`, when set, still runs instead of the upstream installer. Otherwise:
+
+1. Download the upstream installer (`GEMINI_CORE_INSTALL_URL` overrides the URL; 15s timeout) to a temp file in the install dir.
+2. Non-empty download: atomically replace `core-install.sh` / `core-install.ps1`, then run the cached copy.
+3. Failed or empty download: keep the existing cache untouched and run it if it is non-empty; otherwise record `patch_failed` and keep `pending`.
+
+This covers boots where Chrome is closed before DNS is ready. The cached script is only the installer; the post-install state detection still decides `healthy` vs `verify_failed`.
 
 ## 10. Install Directory Derivation
 

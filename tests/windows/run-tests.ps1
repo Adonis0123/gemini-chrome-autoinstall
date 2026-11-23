@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Case = ""
 )
 
@@ -52,6 +52,7 @@ function Invoke-Case {
     "GEMINI_CHROME_VERSION",
     "GEMINI_CHROME_RUNNING",
     "GEMINI_CORE_INSTALL_CMD",
+    "GEMINI_CORE_INSTALL_URL",
     "GEMINI_FAKE_INSTALL_MODE",
     "GEMINI_PROFILE_PATH",
     "GEMINI_SKIP_ENABLE",
@@ -586,6 +587,130 @@ public sealed class GeminiChromeProcessProbe : IDisposable
     if (-not $?) { throw "patch.ps1 run failed in verify-failure-recorded" }
     Assert-FileContains (Join-Path $verifyFailureRuntimeRoot "last-result") "status=verify_failed"
   } -CaseEnv $verifyFailureEnv
+
+  # Core install cache: GEMINI_CORE_INSTALL_URL points at local file:// fixtures, so no
+  # case touches the network. Each generated script tags itself with a source marker
+  # so the cache contents show which copy was stored.
+  $coreCacheRoot = Join-Path $RunRoot "core-install-cache"
+  New-Item -ItemType Directory -Force -Path $coreCacheRoot | Out-Null
+  $healthyFixturePath = Join-Path $FixtureDir "healthy.json"
+  function Write-CoreInstallFixture {
+    param([string]$Path, [string]$SourceTag)
+    New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null
+    $content = "# source=$SourceTag`nCopy-Item -LiteralPath '$healthyFixturePath' -Destination `$env:GEMINI_LOCAL_STATE_PATH -Force`n"
+    [System.IO.File]::WriteAllText($Path, $content, (New-Object System.Text.UTF8Encoding $false))
+  }
+  function Assert-NoCoreInstallTempFiles {
+    param([string]$Dir)
+    $leftovers = @(Get-ChildItem -LiteralPath $Dir -Filter "core-install.ps1.*.tmp" -ErrorAction SilentlyContinue)
+    if ($leftovers.Count -gt 0) {
+      Write-Host "[FAIL] orphaned core install temp files in $Dir"
+      $global:Failures++
+    }
+    else {
+      Write-Host "[PASS] no orphaned core install temp files"
+    }
+  }
+  function New-CoreCacheCaseEnv {
+    param([string]$CaseRoot, [string]$RuntimeRoot, [string]$Url)
+    return @{
+      "USERPROFILE" = Join-Path $CaseRoot "home"
+      "LOCALAPPDATA" = Join-Path $CaseRoot "localappdata"
+      "TEMP" = Join-Path $CaseRoot "temp"
+      "TMP" = Join-Path $CaseRoot "temp"
+      "TMPDIR" = Join-Path $CaseRoot "temp"
+      "GEMINI_CORE_INSTALL_CMD" = ""
+      "GEMINI_INSTALL_DIR" = $RuntimeRoot
+      "GEMINI_LOCAL_STATE_PATH" = Join-Path $RuntimeRoot "Local State"
+      "GEMINI_CORE_INSTALL_URL" = $Url
+      "GEMINI_CHROME_VERSION" = "136.0.7103.49"
+      "GEMINI_CHROME_RUNNING" = "0"
+    }
+  }
+  $coreUpstreamPath = Join-Path $coreCacheRoot "upstream-install.ps1"
+  $coreEmptyPath = Join-Path $coreCacheRoot "empty-install.ps1"
+  $coreFailingPath = Join-Path $coreCacheRoot "failing-install.ps1"
+  $coreMissingUri = ([uri](Join-Path $coreCacheRoot "missing-install.ps1")).AbsoluteUri
+  $coreNowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
+  Write-CoreInstallFixture -Path $coreUpstreamPath -SourceTag "upstream"
+  [System.IO.File]::WriteAllText($coreEmptyPath, "  `n")
+  [System.IO.File]::WriteAllText($coreFailingPath, "exit 1`n")
+
+  $coreFetchOkRoot = Join-Path $coreCacheRoot "fetch-ok"
+  $coreFetchOkRuntime = Join-Path $coreFetchOkRoot "runtime"
+  $coreFetchOkEnv = New-CoreCacheCaseEnv -CaseRoot $coreFetchOkRoot -RuntimeRoot $coreFetchOkRuntime -Url ([uri]$coreUpstreamPath).AbsoluteUri
+  Invoke-Case "core-install-fetch-caches-script" {
+    New-Item -ItemType Directory -Force -Path $coreFetchOkRuntime | Out-Null
+    Set-Content -Path (Join-Path $coreFetchOkRuntime "last-update-check") -Value $coreNowEpoch -NoNewline
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") (Join-Path $coreFetchOkRuntime "Local State") -Force
+    Write-CoreInstallFixture -Path (Join-Path $coreFetchOkRuntime "core-install.ps1") -SourceTag "old-cached"
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in core-install-fetch-caches-script" }
+    Assert-FileContains (Join-Path $coreFetchOkRuntime "last-result") "status=healthy"
+    Assert-FileContains (Join-Path $coreFetchOkRuntime "core-install.ps1") "# source=upstream"
+    Assert-NoCoreInstallTempFiles $coreFetchOkRuntime
+  } -CaseEnv $coreFetchOkEnv
+
+  $coreFetchFailRoot = Join-Path $coreCacheRoot "fetch-fail-cached"
+  $coreFetchFailRuntime = Join-Path $coreFetchFailRoot "runtime"
+  $coreFetchFailEnv = New-CoreCacheCaseEnv -CaseRoot $coreFetchFailRoot -RuntimeRoot $coreFetchFailRuntime -Url $coreMissingUri
+  Invoke-Case "core-install-fetch-fail-uses-cache" {
+    New-Item -ItemType Directory -Force -Path $coreFetchFailRuntime | Out-Null
+    Set-Content -Path (Join-Path $coreFetchFailRuntime "last-update-check") -Value $coreNowEpoch -NoNewline
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") (Join-Path $coreFetchFailRuntime "Local State") -Force
+    Write-CoreInstallFixture -Path (Join-Path $coreFetchFailRuntime "core-install.ps1") -SourceTag "cached"
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in core-install-fetch-fail-uses-cache" }
+    Assert-FileContains (Join-Path $coreFetchFailRuntime "last-result") "status=healthy"
+    Assert-FileContains (Join-Path $coreFetchFailRoot "localappdata\gemini-chrome-autoinstall.log") "falling back to cached script"
+    Assert-FileContains (Join-Path $coreFetchFailRuntime "core-install.ps1") "# source=cached"
+    Assert-NoCoreInstallTempFiles $coreFetchFailRuntime
+  } -CaseEnv $coreFetchFailEnv
+
+  $coreFetchEmptyRoot = Join-Path $coreCacheRoot "fetch-empty-cached"
+  $coreFetchEmptyRuntime = Join-Path $coreFetchEmptyRoot "runtime"
+  $coreFetchEmptyEnv = New-CoreCacheCaseEnv -CaseRoot $coreFetchEmptyRoot -RuntimeRoot $coreFetchEmptyRuntime -Url ([uri]$coreEmptyPath).AbsoluteUri
+  Invoke-Case "core-install-empty-fetch-keeps-cache" {
+    New-Item -ItemType Directory -Force -Path $coreFetchEmptyRuntime | Out-Null
+    Set-Content -Path (Join-Path $coreFetchEmptyRuntime "last-update-check") -Value $coreNowEpoch -NoNewline
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") (Join-Path $coreFetchEmptyRuntime "Local State") -Force
+    Write-CoreInstallFixture -Path (Join-Path $coreFetchEmptyRuntime "core-install.ps1") -SourceTag "cached"
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in core-install-empty-fetch-keeps-cache" }
+    Assert-FileContains (Join-Path $coreFetchEmptyRuntime "last-result") "status=healthy"
+    Assert-FileContains (Join-Path $coreFetchEmptyRoot "localappdata\gemini-chrome-autoinstall.log") "falling back to cached script"
+    Assert-FileContains (Join-Path $coreFetchEmptyRuntime "core-install.ps1") "# source=cached"
+    Assert-NoCoreInstallTempFiles $coreFetchEmptyRuntime
+  } -CaseEnv $coreFetchEmptyEnv
+
+  $coreNoCacheRoot = Join-Path $coreCacheRoot "fetch-fail-no-cache"
+  $coreNoCacheRuntime = Join-Path $coreNoCacheRoot "runtime"
+  $coreNoCacheEnv = New-CoreCacheCaseEnv -CaseRoot $coreNoCacheRoot -RuntimeRoot $coreNoCacheRuntime -Url $coreMissingUri
+  Invoke-Case "core-install-fetch-fail-no-cache" {
+    New-Item -ItemType Directory -Force -Path $coreNoCacheRuntime | Out-Null
+    Set-Content -Path (Join-Path $coreNoCacheRuntime "last-update-check") -Value $coreNowEpoch -NoNewline
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") (Join-Path $coreNoCacheRuntime "Local State") -Force
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in core-install-fetch-fail-no-cache" }
+    Assert-FileContains (Join-Path $coreNoCacheRuntime "last-result") "status=patch_failed"
+    Assert-PathExists (Join-Path $coreNoCacheRuntime "pending")
+    Assert-FileMissing (Join-Path $coreNoCacheRuntime "core-install.ps1")
+    Assert-NoCoreInstallTempFiles $coreNoCacheRuntime
+  } -CaseEnv $coreNoCacheEnv
+
+  $coreChildExitRoot = Join-Path $coreCacheRoot "child-exit-nonzero"
+  $coreChildExitRuntime = Join-Path $coreChildExitRoot "runtime"
+  $coreChildExitEnv = New-CoreCacheCaseEnv -CaseRoot $coreChildExitRoot -RuntimeRoot $coreChildExitRuntime -Url ([uri]$coreFailingPath).AbsoluteUri
+  Invoke-Case "core-install-child-exit-preserves-pending" {
+    New-Item -ItemType Directory -Force -Path $coreChildExitRuntime | Out-Null
+    Set-Content -Path (Join-Path $coreChildExitRuntime "last-update-check") -Value $coreNowEpoch -NoNewline
+    Copy-Item (Join-Path $FixtureDir "drifted-variations-country.json") (Join-Path $coreChildExitRuntime "Local State") -Force
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in core-install-child-exit-preserves-pending" }
+    Assert-FileContains (Join-Path $coreChildExitRuntime "last-result") "status=patch_failed"
+    Assert-PathExists (Join-Path $coreChildExitRuntime "pending")
+    Assert-NoCoreInstallTempFiles $coreChildExitRuntime
+  } -CaseEnv $coreChildExitEnv
 
   # Regression guard for the watcher PID check: Test-WatcherRunning must
   # recognise a live PowerShell process pointed to by watcher.pid *without*

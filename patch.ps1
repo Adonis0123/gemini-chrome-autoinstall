@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Position = 0)]
     [ValidateSet("enable", "disable", "uninstall", "status", "run", "retry", "manual", "watch", "scheduled", "help")]
     [string]$Command = "help"
@@ -37,7 +37,10 @@ $ChromeUpdateWow64SubKey = "Software\WOW6432Node\Google\Update\Clients\{8A69D345
 $ChromeUpdateVersionName = "pv"
 $RetryInterval = 10  # seconds — reduced for faster Chrome-close detection
 $WatcherPidFile = Join-Path $InstallDir "watcher.pid"
-$CoreInstallUrl = "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1"
+$CoreInstallUrl = if ($env:GEMINI_CORE_INSTALL_URL) { $env:GEMINI_CORE_INSTALL_URL } else { "https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.ps1" }
+# Last good copy of the upstream install script, used when the network is not ready yet
+# (e.g. right after login, before DNS resolves).
+$CoreInstallCacheFile = Join-Path $InstallDir "core-install.ps1"
 $script:NeedsPatchChromeVersion = $null
 $Repo = "Adonis0123/gemini-chrome-autoinstall"
 $Branch = "master"
@@ -271,8 +274,92 @@ function Invoke-CoreInstall {
         }
     }
 
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $scriptContent = $null
     try {
-        Invoke-RestMethod -Uri $CoreInstallUrl | Invoke-Expression
+        $scriptContent = Get-CoreInstallScriptContent
+    }
+    catch {
+        Write-Log "Upstream install script fetch failed: $_"
+    }
+
+    $scriptToRun = $null
+    $ephemeralRunFile = $null
+
+    if (-not [string]::IsNullOrWhiteSpace($scriptContent)) {
+        $tmpFile = $null
+        try {
+            New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+            # Callers hold the active lock, so any leftover temp file is from a killed run.
+            Get-ChildItem -LiteralPath $InstallDir -Filter "core-install.ps1.*.tmp" -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+            $tmpFile = Join-Path $InstallDir ("core-install.ps1." + [guid]::NewGuid().ToString("N") + ".tmp")
+            [System.IO.File]::WriteAllText($tmpFile, $scriptContent, $utf8NoBom)
+            if (Test-Path -LiteralPath $CoreInstallCacheFile -PathType Leaf) {
+                [System.IO.File]::Replace($tmpFile, $CoreInstallCacheFile, [System.Management.Automation.Language.NullString]::Value)
+            }
+            else {
+                [System.IO.File]::Move($tmpFile, $CoreInstallCacheFile)
+            }
+            $tmpFile = $null
+            $scriptToRun = $CoreInstallCacheFile
+        }
+        catch {
+            Write-Log "Warning: cannot update cached install script ${CoreInstallCacheFile}: $_"
+            if ($tmpFile -and (Test-Path -LiteralPath $tmpFile -PathType Leaf)) {
+                $ephemeralRunFile = $tmpFile
+                $tmpFile = $null
+                $scriptToRun = $ephemeralRunFile
+            }
+            else {
+                try {
+                    $ephemeralRunFile = Join-Path $env:TEMP ("core-install.ps1." + [guid]::NewGuid().ToString("N") + ".ps1")
+                    [System.IO.File]::WriteAllText($ephemeralRunFile, $scriptContent, $utf8NoBom)
+                    $scriptToRun = $ephemeralRunFile
+                }
+                catch {
+                    Write-Log "Install failed: cannot stage downloaded install script for execution: $_"
+                    return $false
+                }
+            }
+        }
+        finally {
+            if ($tmpFile) { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    else {
+        $cachedContent = $null
+        if (Test-Path -LiteralPath $CoreInstallCacheFile -PathType Leaf) {
+            try {
+                $cachedContent = [System.IO.File]::ReadAllText($CoreInstallCacheFile, $utf8NoBom)
+            }
+            catch {
+                Write-Log "Install failed: cannot read cached install script ${CoreInstallCacheFile}: $_"
+                return $false
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($cachedContent)) {
+            Write-Log "Install failed: upstream install script unavailable and no cached script is available."
+            return $false
+        }
+        Write-Log "Upstream install script fetch failed or returned empty content; falling back to cached script."
+        $scriptToRun = $CoreInstallCacheFile
+    }
+
+    # Run the upstream script in an isolated child PowerShell process so its `exit 1`
+    # branches cannot terminate patch.ps1 (which would skip patch_failed / pending writes),
+    # and pass -ExecutionPolicy Bypass so local policy does not block the cached .ps1 file.
+    $psExe = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "powershell.exe" }
+    try {
+        & $psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptToRun | Out-Null
+        $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
+        if (-not $? -and $exitCode -eq 0) {
+            $exitCode = 1
+        }
+        if ($exitCode -ne 0) {
+            Write-Log "Install failed with exit code $exitCode."
+            return $false
+        }
         Write-Log "Install completed successfully."
         return $true
     }
@@ -280,6 +367,41 @@ function Invoke-CoreInstall {
         Write-Log "Install failed: $_"
         return $false
     }
+    finally {
+        if ($ephemeralRunFile) {
+            Remove-Item -LiteralPath $ephemeralRunFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-CoreInstallScriptContent {
+    $uri = [uri]$CoreInstallUrl
+    # PowerShell 7's Invoke-WebRequest rejects file:// URIs; read them directly so the
+    # GEMINI_CORE_INSTALL_URL override behaves like curl on macOS.
+    if ($uri.IsFile) {
+        return [System.IO.File]::ReadAllText($uri.LocalPath, (New-Object System.Text.UTF8Encoding $false))
+    }
+
+    $requestParams = @{
+        Uri = $CoreInstallUrl
+        TimeoutSec = 15
+    }
+    $iwrParams = (Get-Command Invoke-WebRequest).Parameters
+    if ($iwrParams.ContainsKey("UseBasicParsing")) {
+        $requestParams.UseBasicParsing = $true
+    }
+    if ($iwrParams.ContainsKey("OperationTimeoutSeconds")) {
+        $requestParams.OperationTimeoutSeconds = 15
+    }
+    $response = Invoke-WebRequest @requestParams
+    if ($response.StatusCode -eq 206) {
+        throw "partial HTTP 206 response"
+    }
+    $content = $response.Content
+    if ($content -is [byte[]]) {
+        return [System.Text.Encoding]::UTF8.GetString($content)
+    }
+    return [string]$content
 }
 
 function Get-ChromeVersion {

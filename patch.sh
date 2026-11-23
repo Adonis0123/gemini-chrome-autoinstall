@@ -25,7 +25,11 @@ CHROME_USER_DATA_DIR="$(dirname "$LOCAL_STATE_FILE")"
 VARIATIONS_SEED_FILES=("VariationsSeedV2" "VariationsSafeSeedV2")
 TOOL_VERSION_FILE="${SCRIPT_DIR}/VERSION"
 CORE_INSTALL_CMD="${GEMINI_CORE_INSTALL_CMD:-}"
-CORE_INSTALL_URL="https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh"
+CORE_INSTALL_URL="${GEMINI_CORE_INSTALL_URL:-https://raw.githubusercontent.com/appsail/Gemini-in-Chrome/main/install.sh}"
+# Last good copy of the upstream install script, used when the network is not ready yet
+# (e.g. right after login, before DNS resolves).
+CORE_INSTALL_CACHE_FILE="$INSTALL_DIR/core-install.sh"
+CORE_INSTALL_TMP_FILE=""
 PROCESS_NAME="gemini-chrome-autopatch"
 LAUNCH_EXECUTABLE="${SCRIPT_DIR}/${PROCESS_NAME}"
 NEEDS_PATCH_CHROME_VERSION=""
@@ -236,12 +240,27 @@ release_active_lock() {
     rmdir "$ACTIVE_LOCK_DIR" 2>/dev/null || rm -rf "$ACTIVE_LOCK_DIR" 2>/dev/null || true
 }
 
+cleanup_on_exit() {
+    if [ -n "${CORE_INSTALL_TMP_FILE:-}" ]; then
+        rm -f "$CORE_INSTALL_TMP_FILE" 2>/dev/null || true
+        CORE_INSTALL_TMP_FILE=""
+    fi
+    release_active_lock
+}
+
 arm_active_lock_cleanup() {
-    trap 'release_active_lock' INT TERM EXIT
+    trap 'cleanup_on_exit' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 }
 
 disarm_active_lock_cleanup() {
     trap - INT TERM EXIT
+}
+
+file_has_non_whitespace() {
+    local target="$1"
+    [ -f "$target" ] && [ -s "$target" ] && grep -q '[^[:space:]]' "$target"
 }
 
 run_core_install() {
@@ -267,12 +286,68 @@ run_core_install() {
         return 1
     fi
 
-    if curl -fsSL "$CORE_INSTALL_URL" | bash; then
-        log "Install completed successfully."
+    local script_to_run=""
+    local tmp_file=""
+    local curl_rc=0
+
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    # Callers hold the active lock, so any leftover temp file is from a killed run.
+    rm -f "$INSTALL_DIR"/core-install.sh.?????? 2>/dev/null || true
+
+    if tmp_file=$(mktemp "$INSTALL_DIR/core-install.sh.XXXXXX" 2>/dev/null); then
+        CORE_INSTALL_TMP_FILE="$tmp_file"
+        local http_code=""
+        http_code=$(curl -fsSL --connect-timeout 5 --max-time 15 -w '%{http_code}' "$CORE_INSTALL_URL" -o "$tmp_file") || curl_rc=$?
+
+        if [ "$curl_rc" -eq 0 ] && [ "$http_code" != "206" ] && file_has_non_whitespace "$tmp_file"; then
+            if mv -f "$tmp_file" "$CORE_INSTALL_CACHE_FILE" 2>/dev/null; then
+                CORE_INSTALL_TMP_FILE=""
+                script_to_run="$CORE_INSTALL_CACHE_FILE"
+            else
+                log "Warning: cannot update cached install script $CORE_INSTALL_CACHE_FILE; executing downloaded copy directly."
+                script_to_run="$tmp_file"
+            fi
+        else
+            rm -f "$tmp_file" 2>/dev/null || true
+            CORE_INSTALL_TMP_FILE=""
+            local fetch_problem="exit $curl_rc"
+            if [ "$curl_rc" -eq 0 ]; then
+                if [ "$http_code" = "206" ]; then
+                    fetch_problem="partial HTTP 206 response"
+                else
+                    fetch_problem="empty response"
+                fi
+            fi
+            if file_has_non_whitespace "$CORE_INSTALL_CACHE_FILE"; then
+                log "Upstream install script fetch failed ($fetch_problem); falling back to cached script."
+                script_to_run="$CORE_INSTALL_CACHE_FILE"
+            else
+                log "Install failed: upstream install script fetch failed ($fetch_problem) and no cached script is available."
+                return 1
+            fi
+        fi
     else
-        log "Install failed with exit code $?."
-        return 1
+        if file_has_non_whitespace "$CORE_INSTALL_CACHE_FILE"; then
+            log "Warning: cannot create temp file in $INSTALL_DIR; falling back to cached script."
+            script_to_run="$CORE_INSTALL_CACHE_FILE"
+        else
+            log "Install failed: cannot create temp file in $INSTALL_DIR and no cached script is available."
+            return 1
+        fi
     fi
+
+    local rc=0
+    bash "$script_to_run" || rc=$?
+    if [ -n "$CORE_INSTALL_TMP_FILE" ]; then
+        rm -f "$CORE_INSTALL_TMP_FILE" 2>/dev/null || true
+        CORE_INSTALL_TMP_FILE=""
+    fi
+    if [ "$rc" -eq 0 ]; then
+        log "Install completed successfully."
+        return 0
+    fi
+    log "Install failed with exit code $rc."
+    return 1
 }
 
 # Usage: variations_seed_country <check|patch>

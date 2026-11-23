@@ -248,6 +248,121 @@ if run_case "verify-failure-recorded" env \
   assert_file_contains "$TMPDIR/runtime/verify-failure/last-result" "status=verify_failed"
 fi
 
+# Core install cache: GEMINI_CORE_INSTALL_URL points at local file:// fixtures, so no
+# case touches the network. Each generated script tags itself with a source marker
+# so the cache contents show which copy was stored.
+write_core_install_fixture() {
+  local path="$1"
+  local source_tag="$2"
+  mkdir -p "$(dirname "${path}")"
+  cat > "${path}" <<SCRIPT
+# source=${source_tag}
+cp "$FIXTURE_DIR/healthy.json" "\$GEMINI_LOCAL_STATE_PATH"
+SCRIPT
+}
+
+assert_no_core_install_temp_files() {
+  local dir="$1"
+  if compgen -G "${dir}/core-install.sh.*" > /dev/null; then
+    echo "[FAIL] orphaned core install temp files in ${dir}"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo "[PASS] no orphaned core install temp files"
+  fi
+}
+
+to_file_uri() {
+  python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())' "$1"
+}
+
+CORE_CACHE_ROOT="$TMP_ROOT/runtime/core-cache"
+CORE_CACHE_UPSTREAM="$CORE_CACHE_ROOT/upstream-install.sh"
+CORE_CACHE_EMPTY="$CORE_CACHE_ROOT/empty-install.sh"
+CORE_CACHE_NOW="$(date +%s)"
+write_core_install_fixture "$CORE_CACHE_UPSTREAM" "upstream"
+printf '  \n\t \n' > "$CORE_CACHE_EMPTY"
+CORE_CACHE_UPSTREAM_URI="$(to_file_uri "$CORE_CACHE_UPSTREAM")"
+CORE_CACHE_EMPTY_URI="$(to_file_uri "$CORE_CACHE_EMPTY")"
+CORE_CACHE_MISSING_URI="$(to_file_uri "$CORE_CACHE_ROOT/missing-install.sh")"
+
+CORE_FETCH_OK_DIR="$CORE_CACHE_ROOT/fetch-ok"
+mkdir -p "$CORE_FETCH_OK_DIR"
+printf '%s' "$CORE_CACHE_NOW" > "$CORE_FETCH_OK_DIR/last-update-check"
+cp "$FIXTURE_DIR/drifted-variations-country.json" "$CORE_FETCH_OK_DIR/local-state.json"
+write_core_install_fixture "$CORE_FETCH_OK_DIR/core-install.sh" "old-cached"
+if run_case "core-install-fetch-caches-script" env \
+  GEMINI_CORE_INSTALL_CMD="" \
+  GEMINI_INSTALL_DIR="$CORE_FETCH_OK_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$CORE_FETCH_OK_DIR/local-state.json" \
+  GEMINI_CORE_INSTALL_URL="$CORE_CACHE_UPSTREAM_URI" \
+  GEMINI_LOG_FILE="$CORE_FETCH_OK_DIR/test.log" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$CORE_FETCH_OK_DIR/last-result" "status=healthy"
+  assert_file_contains "$CORE_FETCH_OK_DIR/core-install.sh" "# source=upstream"
+  assert_no_core_install_temp_files "$CORE_FETCH_OK_DIR"
+fi
+
+CORE_FETCH_FAIL_DIR="$CORE_CACHE_ROOT/fetch-fail-cached"
+mkdir -p "$CORE_FETCH_FAIL_DIR"
+printf '%s' "$CORE_CACHE_NOW" > "$CORE_FETCH_FAIL_DIR/last-update-check"
+cp "$FIXTURE_DIR/drifted-variations-country.json" "$CORE_FETCH_FAIL_DIR/local-state.json"
+write_core_install_fixture "$CORE_FETCH_FAIL_DIR/core-install.sh" "cached"
+if run_case "core-install-fetch-fail-uses-cache" env \
+  GEMINI_CORE_INSTALL_CMD="" \
+  GEMINI_INSTALL_DIR="$CORE_FETCH_FAIL_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$CORE_FETCH_FAIL_DIR/local-state.json" \
+  GEMINI_CORE_INSTALL_URL="$CORE_CACHE_MISSING_URI" \
+  GEMINI_LOG_FILE="$CORE_FETCH_FAIL_DIR/test.log" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$CORE_FETCH_FAIL_DIR/last-result" "status=healthy"
+  assert_file_contains "$CORE_FETCH_FAIL_DIR/test.log" "falling back to cached script"
+  assert_file_contains "$CORE_FETCH_FAIL_DIR/core-install.sh" "# source=cached"
+  assert_no_core_install_temp_files "$CORE_FETCH_FAIL_DIR"
+fi
+
+CORE_FETCH_EMPTY_DIR="$CORE_CACHE_ROOT/fetch-empty-cached"
+mkdir -p "$CORE_FETCH_EMPTY_DIR"
+printf '%s' "$CORE_CACHE_NOW" > "$CORE_FETCH_EMPTY_DIR/last-update-check"
+cp "$FIXTURE_DIR/drifted-variations-country.json" "$CORE_FETCH_EMPTY_DIR/local-state.json"
+write_core_install_fixture "$CORE_FETCH_EMPTY_DIR/core-install.sh" "cached"
+if run_case "core-install-empty-fetch-keeps-cache" env \
+  GEMINI_CORE_INSTALL_CMD="" \
+  GEMINI_INSTALL_DIR="$CORE_FETCH_EMPTY_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$CORE_FETCH_EMPTY_DIR/local-state.json" \
+  GEMINI_CORE_INSTALL_URL="$CORE_CACHE_EMPTY_URI" \
+  GEMINI_LOG_FILE="$CORE_FETCH_EMPTY_DIR/test.log" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$CORE_FETCH_EMPTY_DIR/last-result" "status=healthy"
+  assert_file_contains "$CORE_FETCH_EMPTY_DIR/test.log" "falling back to cached script"
+  assert_file_contains "$CORE_FETCH_EMPTY_DIR/core-install.sh" "# source=cached"
+  assert_no_core_install_temp_files "$CORE_FETCH_EMPTY_DIR"
+fi
+
+CORE_FETCH_NO_CACHE_DIR="$CORE_CACHE_ROOT/fetch-fail-no-cache"
+mkdir -p "$CORE_FETCH_NO_CACHE_DIR"
+printf '%s' "$CORE_CACHE_NOW" > "$CORE_FETCH_NO_CACHE_DIR/last-update-check"
+cp "$FIXTURE_DIR/drifted-variations-country.json" "$CORE_FETCH_NO_CACHE_DIR/local-state.json"
+if run_case "core-install-fetch-fail-no-cache" env \
+  GEMINI_CORE_INSTALL_CMD="" \
+  GEMINI_INSTALL_DIR="$CORE_FETCH_NO_CACHE_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$CORE_FETCH_NO_CACHE_DIR/local-state.json" \
+  GEMINI_CORE_INSTALL_URL="$CORE_CACHE_MISSING_URI" \
+  GEMINI_LOG_FILE="$CORE_FETCH_NO_CACHE_DIR/test.log" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$CORE_FETCH_NO_CACHE_DIR/last-result" "status=patch_failed"
+  assert_file_contains "$CORE_FETCH_NO_CACHE_DIR/pending" "reason=patch_failed"
+  assert_file_missing "$CORE_FETCH_NO_CACHE_DIR/core-install.sh"
+  assert_no_core_install_temp_files "$CORE_FETCH_NO_CACHE_DIR"
+fi
+
 SEED_HELPER="$REPO_ROOT/tests/helpers/variations-seed.py"
 
 SEED_STATUS_DIR="$TMP_ROOT/runtime/seed-status"

@@ -350,6 +350,16 @@ run_core_install() {
     return 1
 }
 
+has_variations_seed_files() {
+    local name
+    for name in "${VARIATIONS_SEED_FILES[@]}"; do
+        if [ -f "$CHROME_USER_DATA_DIR/$name" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Usage: variations_seed_country <check|patch>
 # check prints: none | ok | drifted|<country> | error|<reason>
 # patch prints: none | patched|<count> | error|<reason>
@@ -527,8 +537,10 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
     data = json.load(handle)
 
 variations_country = data.get("variations_country") or ""
-permanent_values = data.get("variations_permanent_consistency_country") or []
-permanent_country = permanent_values[-1] if isinstance(permanent_values, list) and permanent_values else ""
+permanent_values = data.get("variations_permanent_consistency_country")
+permanent_country = ""
+if isinstance(permanent_values, list) and permanent_values and isinstance(permanent_values[-1], str):
+    permanent_country = permanent_values[-1].strip()
 
 has_true = False
 has_false = False
@@ -560,11 +572,15 @@ PY
     local has_glic_false
     has_glic_false=$(printf '%s\n' "$parsed_fields" | sed -n '4p')
 
-    if [ -z "$variations_country" ] || [ -z "$permanent_country" ] || { [ "$has_glic_true" = "0" ] && [ "$has_glic_false" = "0" ]; }; then
+    # Chrome 153+ keeps the permanent country in V2 seed files, so Local State may omit it.
+    # Legacy installs without V2 seed files still require it.
+    if [ -z "$variations_country" ] \
+        || { [ -z "$permanent_country" ] && ! has_variations_seed_files; } \
+        || { [ "$has_glic_true" = "0" ] && [ "$has_glic_false" = "0" ]; }; then
         echo "unknown|missing_required_fields"
     elif [ "$variations_country" != "us" ]; then
         echo "drifted|variations_country=$variations_country"
-    elif [ "$permanent_country" != "us" ]; then
+    elif [ -n "$permanent_country" ] && [ "$permanent_country" != "us" ]; then
         echo "drifted|variations_permanent_consistency_country=$permanent_country"
     elif [ "$has_glic_false" = "1" ]; then
         echo "drifted|glic_not_eligible"

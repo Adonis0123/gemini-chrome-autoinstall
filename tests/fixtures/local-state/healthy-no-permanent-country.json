@@ -1,0 +1,9 @@
+{
+  "variations_country": "us",
+  "profile": {
+    "info_cache": {
+      "Default": { "is_glic_eligible": true },
+      "Profile 1": { "is_glic_eligible": true }
+    }
+  }
+}

@@ -922,13 +922,14 @@ public sealed class GeminiChromeProcessProbe : IDisposable
   } -CaseEnv $stopReuseEnv
 
   # Minimal Chrome stored-seed record: field 6 = session country, field 7 = permanent country.
+  # An empty -Session / -Permanent omits that field, like Chrome 158's country-less V2 seed.
   function New-SeedRecord {
     param([string]$Session, [string]$Permanent)
     $ascii = [System.Text.Encoding]::ASCII
     [byte[]]$record = @(0x0A, 4) + $ascii.GetBytes("seed") +
-      @(0x18, 0x99, 0x01) +  # varint 153 (multi-byte), exercises wire type 0
-      @(0x32, 2) + $ascii.GetBytes($Session) +
-      @(0x3A, 2) + $ascii.GetBytes($Permanent)
+      @(0x18, 0x99, 0x01)  # varint 153 (multi-byte), exercises wire type 0
+    if ($Session) { $record += @(0x32, 2) + $ascii.GetBytes($Session) }
+    if ($Permanent) { $record += @(0x3A, 2) + $ascii.GetBytes($Permanent) }
     return , $record
   }
 
@@ -1014,6 +1015,120 @@ public sealed class GeminiChromeProcessProbe : IDisposable
     if (-not $?) { throw "patch.ps1 status failed in status-unknown-when-zstd-unavailable" }
     Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: unknown"
   } -CaseEnv $seedNoZstdEnv
+
+  # Chrome 153+ keeps the permanent country in V2 seed files; Local State may omit it.
+  # Legacy Chrome (no V2 seed files) must still report unknown.
+  function New-NoPermanentCaseEnv {
+    param([string]$CaseRoot, [string]$ChromeVersion, [string]$ChromeRunning)
+    return @{
+      "USERPROFILE" = Join-Path $CaseRoot "home"
+      "LOCALAPPDATA" = Join-Path $CaseRoot "localappdata"
+      "TEMP" = Join-Path $CaseRoot "temp"
+      "TMP" = Join-Path $CaseRoot "temp"
+      "TMPDIR" = Join-Path $CaseRoot "temp"
+      "GEMINI_INSTALL_DIR" = Join-Path $CaseRoot "runtime"
+      "GEMINI_LOCAL_STATE_PATH" = Join-Path (Join-Path $CaseRoot "userdata") "Local State"
+      "GEMINI_CHROME_VERSION" = $ChromeVersion
+      "GEMINI_CHROME_RUNNING" = $ChromeRunning
+    }
+  }
+
+  $noPermNoSeedRoot = Join-Path $RunRoot "tri-state-unknown-no-permanent-country-without-seed"
+  $noPermNoSeedEnv = New-NoPermanentCaseEnv -CaseRoot $noPermNoSeedRoot -ChromeVersion "136.0.7103.49" -ChromeRunning "0"
+  Invoke-Case "tri-state-unknown-no-permanent-country-without-seed" {
+    $userData = Join-Path $noPermNoSeedRoot "userdata"
+    $runtime = Join-Path $noPermNoSeedRoot "runtime"
+    New-Item -ItemType Directory -Force -Path $userData, $runtime | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy-no-permanent-country.json") (Join-Path $userData "Local State") -Force
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in tri-state-unknown-no-permanent-country-without-seed" }
+    Assert-FileContains (Join-Path $runtime "last-result") "status=detect_error"
+    Assert-FileContains (Join-Path $runtime "last-result") "reason=missing_required_fields"
+  } -CaseEnv $noPermNoSeedEnv
+
+  $noPermUsSeedRoot = Join-Path $RunRoot "healthy-no-permanent-country-with-us-seed"
+  $noPermUsSeedEnv = New-NoPermanentCaseEnv -CaseRoot $noPermUsSeedRoot -ChromeVersion "158.0.8127.38" -ChromeRunning "0"
+  Invoke-Case "healthy-no-permanent-country-with-us-seed" {
+    $userData = Join-Path $noPermUsSeedRoot "userdata"
+    $runtime = Join-Path $noPermUsSeedRoot "runtime"
+    New-Item -ItemType Directory -Force -Path $userData, $runtime | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy-no-permanent-country.json") (Join-Path $userData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSeedV2"), (New-SeedRecord -Session "us" -Permanent "us"))
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in healthy-no-permanent-country-with-us-seed" }
+    Assert-FileContains (Join-Path $runtime "last-result") "status=healthy"
+  } -CaseEnv $noPermUsSeedEnv
+
+  $noPermBlankSeedRoot = Join-Path $RunRoot "healthy-no-permanent-country-with-countryless-seed"
+  $noPermBlankSeedEnv = New-NoPermanentCaseEnv -CaseRoot $noPermBlankSeedRoot -ChromeVersion "158.0.8127.38" -ChromeRunning "0"
+  Invoke-Case "healthy-no-permanent-country-with-countryless-seed" {
+    $userData = Join-Path $noPermBlankSeedRoot "userdata"
+    $runtime = Join-Path $noPermBlankSeedRoot "runtime"
+    New-Item -ItemType Directory -Force -Path $userData, $runtime | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy-no-permanent-country.json") (Join-Path $userData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSeedV2"), (New-SeedRecord -Session "" -Permanent ""))
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSafeSeedV2"), (New-SeedRecord -Session "" -Permanent ""))
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in healthy-no-permanent-country-with-countryless-seed" }
+    Assert-FileContains (Join-Path $runtime "last-result") "status=healthy"
+  } -CaseEnv $noPermBlankSeedEnv
+
+  $noPermCnStatusRoot = Join-Path $RunRoot "status-drifted-no-permanent-country-with-cn-seed"
+  $noPermCnStatusEnv = New-NoPermanentCaseEnv -CaseRoot $noPermCnStatusRoot -ChromeVersion "158.0.8127.38" -ChromeRunning "1"
+  Invoke-Case "status-drifted-no-permanent-country-with-cn-seed" {
+    $userData = Join-Path $noPermCnStatusRoot "userdata"
+    New-Item -ItemType Directory -Force -Path $userData | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy-no-permanent-country.json") (Join-Path $userData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSeedV2"), (New-SeedRecord -Session "cn" -Permanent "cn"))
+    $statusOutputPath = Join-Path $noPermCnStatusRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed in status-drifted-no-permanent-country-with-cn-seed" }
+    Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: drifted"
+  } -CaseEnv $noPermCnStatusEnv
+
+  $noPermCnPatchRoot = Join-Path $RunRoot "run-patches-no-permanent-country-cn-seed"
+  $noPermCnPatchEnv = New-NoPermanentCaseEnv -CaseRoot $noPermCnPatchRoot -ChromeVersion "158.0.8127.38" -ChromeRunning "0"
+  $noPermCnPatchEnv["GEMINI_CORE_INSTALL_CMD"] = Join-Path $noPermCnPatchRoot "noop-core-install.ps1"
+  Invoke-Case "run-patches-no-permanent-country-cn-seed" {
+    $userData = Join-Path $noPermCnPatchRoot "userdata"
+    $runtime = Join-Path $noPermCnPatchRoot "runtime"
+    New-Item -ItemType Directory -Force -Path $userData, $runtime | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy-no-permanent-country.json") (Join-Path $userData "Local State") -Force
+    Set-Content -Path (Join-Path $noPermCnPatchRoot "noop-core-install.ps1") -Value "exit 0"
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSeedV2"), (New-SeedRecord -Session "cn" -Permanent "cn"))
+    & "$RepoRoot\patch.ps1" run | Out-Null
+    if (-not $?) { throw "patch.ps1 run failed in run-patches-no-permanent-country-cn-seed" }
+    Assert-FileContains (Join-Path $runtime "last-result") "status=healthy"
+    Assert-Contains (Get-SeedRecordCountries (Join-Path $userData "VariationsSeedV2")) "us,us"
+    Assert-FileMissing (Join-Path $runtime "pending")
+  } -CaseEnv $noPermCnPatchEnv
+
+  $noPermNoZstdRoot = Join-Path $RunRoot "status-unknown-no-permanent-country-when-zstd-unavailable"
+  $noPermNoZstdEnv = New-NoPermanentCaseEnv -CaseRoot $noPermNoZstdRoot -ChromeVersion "158.0.8127.38" -ChromeRunning "1"
+  $noPermNoZstdEnv["GEMINI_ZSTD_PATH"] = Join-Path $noPermNoZstdRoot "missing-zstd.exe"
+  Invoke-Case "status-unknown-no-permanent-country-when-zstd-unavailable" {
+    $userData = Join-Path $noPermNoZstdRoot "userdata"
+    New-Item -ItemType Directory -Force -Path $userData | Out-Null
+    Copy-Item (Join-Path $FixtureDir "healthy-no-permanent-country.json") (Join-Path $userData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSeedV2"), [byte[]](0x28, 0xB5, 0x2F, 0xFD, 0x00))
+    $statusOutputPath = Join-Path $noPermNoZstdRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed in status-unknown-no-permanent-country-when-zstd-unavailable" }
+    Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: unknown"
+  } -CaseEnv $noPermNoZstdEnv
+
+  $permCnUsSeedRoot = Join-Path $RunRoot "status-drifted-permanent-country-cn-with-us-seed"
+  $permCnUsSeedEnv = New-NoPermanentCaseEnv -CaseRoot $permCnUsSeedRoot -ChromeVersion "158.0.8127.38" -ChromeRunning "1"
+  Invoke-Case "status-drifted-permanent-country-cn-with-us-seed" {
+    $userData = Join-Path $permCnUsSeedRoot "userdata"
+    New-Item -ItemType Directory -Force -Path $userData | Out-Null
+    Copy-Item (Join-Path $FixtureDir "drifted-permanent-country.json") (Join-Path $userData "Local State") -Force
+    [System.IO.File]::WriteAllBytes((Join-Path $userData "VariationsSeedV2"), (New-SeedRecord -Session "us" -Permanent "us"))
+    $statusOutputPath = Join-Path $permCnUsSeedRoot "status.txt"
+    & "$RepoRoot\patch.ps1" status *> $statusOutputPath
+    if (-not $?) { throw "patch.ps1 status failed in status-drifted-permanent-country-cn-with-us-seed" }
+    Assert-Contains (Get-Content -Path $statusOutputPath -Raw) "Current state: drifted"
+  } -CaseEnv $permCnUsSeedEnv
 
   # launcher.vbs must not silently launch PowerShell against a patch.ps1
   # that antivirus quarantined; it logs the reason and the fix instead.

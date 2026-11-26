@@ -3,6 +3,8 @@
 
   variations-seed.py write <path> <session_country> <permanent_country> [zstd]
   variations-seed.py read <path>   -> prints "<session>,<permanent>"
+
+An empty country argument omits that field, like Chrome 158's country-less V2 seed.
 """
 import shutil
 import subprocess
@@ -19,8 +21,8 @@ def build(session, permanent):
     return (
         field(1, b"seed-data")
         + bytes([3 << 3, 0x99, 0x01])  # varint 153 (multi-byte), exercises wire type 0
-        + field(6, session.encode())
-        + field(7, permanent.encode())
+        + (field(6, session.encode()) if session else b"")
+        + (field(7, permanent.encode()) if permanent else b"")
         + field(8, b"153.0.8010.53")
     )
 

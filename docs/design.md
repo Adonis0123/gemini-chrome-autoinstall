@@ -121,18 +121,21 @@ hint=
 The detector currently checks these `Local State` signals:
 
 - `variations_country == "us"`
-- trailing country value in `variations_permanent_consistency_country == "us"`
+- trailing country value in `variations_permanent_consistency_country == "us"` (optional when Chrome 153+ V2 seed files exist, see below)
 - at least one `profile.info_cache.*.is_glic_eligible` value exists
 - no `is_glic_eligible == false`
 
 Detector rules:
 
 - missing file or invalid JSON -> `unknown`
-- missing required fields -> `unknown`
+- missing `variations_country` or `is_glic_eligible` -> `unknown`
+- missing, empty or non-string `variations_permanent_consistency_country` -> `unknown`, unless a V2 seed file (`VariationsSeedV2` / `VariationsSafeSeedV2`) exists
 - `variations_country != "us"` -> `drifted`
-- trailing `variations_permanent_consistency_country != "us"` -> `drifted`
+- non-empty trailing `variations_permanent_consistency_country != "us"` -> `drifted` (also when V2 seed files exist)
 - any `is_glic_eligible == false` -> `drifted`
-- otherwise -> `healthy`
+- otherwise the V2 seed country check runs: `drifted` on a non-`us` country, `unknown` if the seed cannot be read, else `healthy`
+
+Chrome 153+ keeps the permanent country in the V2 seed files and may drop `variations_permanent_consistency_country` from `Local State`. When V2 seed files are present the field is therefore optional; legacy installs without them still require it.
 
 ## 6. macOS Trigger Model
 
@@ -298,6 +301,7 @@ The test suite is organized around fixed `Local State` fixtures and deterministi
 - `drifted-variations-country`
 - `drifted-permanent-country`
 - `drifted-glic-false`
+- `healthy-no-permanent-country` (Chrome 153+ shape; paired with generated V2 seed files in the seed cases)
 - `unknown-missing-fields`
 - `unknown-invalid`
 
@@ -311,6 +315,7 @@ The test suite is organized around fixed `Local State` fixtures and deterministi
 - `patch_failed`
 - `verify_failed`
 - richer `status` output
+- missing `variations_permanent_consistency_country`: `unknown` without V2 seed files; `healthy` / `drifted` / patched through the seed files when they exist; `unknown` when zstd is unavailable
 
 ### Verification commands
 

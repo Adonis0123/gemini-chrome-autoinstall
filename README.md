@@ -71,6 +71,8 @@ Chrome 153+ also stores the variations country in `VariationsSeedV2` / `Variatio
 
 If zstd is unavailable, `status` reports `unknown` with reason `seed_zstd_unavailable`.
 
+When those V2 seed files exist, `variations_permanent_consistency_country` in `Local State` is optional: Chrome 153+ may omit it. It is still checked when present (anything other than `us` is `drifted`), and otherwise the permanent country is validated through the seed files. Legacy installs without V2 seed files still require it, and report `unknown` (`missing_required_fields`) when it is missing.
+
 - `healthy`: required fields already match the expected Gemini-in-Chrome state
 - `drifted`: Chrome state has moved away from the expected patched values
 - `unknown`: the tool cannot prove health because the file is missing, malformed, or missing required fields

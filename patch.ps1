@@ -600,6 +600,13 @@ function Invoke-VariationsSeedPatch {
     return $true
 }
 
+function Test-HasVariationsSeedFiles {
+    foreach ($name in $VariationsSeedFiles) {
+        if (Test-Path -LiteralPath (Join-Path $ChromeUserDataDir $name) -PathType Leaf) { return $true }
+    }
+    return $false
+}
+
 function Get-PatchState {
     if (-not (Test-Path $LocalStatePath)) {
         return @{ state = "unknown"; reason = "local_state_missing" }
@@ -612,17 +619,20 @@ function Get-PatchState {
         return @{ state = "unknown"; reason = "invalid_json" }
     }
 
-    if (-not ($json.PSObject.Properties.Name -contains "variations_country") -or
-        -not ($json.PSObject.Properties.Name -contains "variations_permanent_consistency_country")) {
+    if (-not ($json.PSObject.Properties.Name -contains "variations_country")) {
         return @{ state = "unknown"; reason = "missing_required_fields" }
     }
 
     $variationsCountry = [string]$json.variations_country
-    $permanentCountryValues = @($json.variations_permanent_consistency_country)
-    if ($permanentCountryValues.Count -eq 0) {
-        return @{ state = "unknown"; reason = "missing_required_fields" }
+    $permanentCountry = ""
+    if ($json.PSObject.Properties.Name -contains "variations_permanent_consistency_country") {
+        $permanentCountryValues = @($json.variations_permanent_consistency_country)
+        if ($permanentCountryValues.Count -gt 0) {
+            $lastPermanentValue = $permanentCountryValues[-1]
+            if ($lastPermanentValue -is [string]) { $permanentCountry = $lastPermanentValue.Trim() }
+        }
     }
-    $permanentCountry = [string]$permanentCountryValues[-1]
+    $hasPermanentCountry = -not [string]::IsNullOrWhiteSpace($permanentCountry)
 
     $hasGlicTrue = $false
     $hasGlicFalse = $false
@@ -640,8 +650,10 @@ function Get-PatchState {
         }
     }
 
+    # Chrome 153+ keeps the permanent country in V2 seed files, so Local State may omit it.
+    # Legacy installs without V2 seed files still require it.
     if ([string]::IsNullOrWhiteSpace($variationsCountry) -or
-        [string]::IsNullOrWhiteSpace($permanentCountry) -or
+        (-not $hasPermanentCountry -and -not (Test-HasVariationsSeedFiles)) -or
         (-not $hasGlicTrue -and -not $hasGlicFalse)) {
         return @{ state = "unknown"; reason = "missing_required_fields" }
     }
@@ -650,7 +662,7 @@ function Get-PatchState {
         return @{ state = "drifted"; reason = "variations_country=$variationsCountry" }
     }
 
-    if ($permanentCountry -ne "us") {
+    if ($hasPermanentCountry -and $permanentCountry -ne "us") {
         return @{ state = "drifted"; reason = "variations_permanent_consistency_country=$permanentCountry" }
     }
 

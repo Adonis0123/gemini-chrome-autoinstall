@@ -455,6 +455,100 @@ if run_case "status-unknown-when-zstd-unavailable" env \
   assert_contains "${CASE_OUTPUT}" "Current state: unknown"
 fi
 
+# Chrome 153+ keeps the permanent country in V2 seed files; Local State may omit it.
+# Legacy Chrome (no V2 seed files) must still report unknown.
+NOPERM_NOSEED_DIR="$TMP_ROOT/runtime/noperm-no-seed"
+mkdir -p "$NOPERM_NOSEED_DIR"
+cp "$FIXTURE_DIR/healthy-no-permanent-country.json" "$NOPERM_NOSEED_DIR/Local State"
+if run_case "tri-state-unknown-no-permanent-country-without-seed" env \
+  GEMINI_INSTALL_DIR="$NOPERM_NOSEED_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_NOSEED_DIR/Local State" \
+  GEMINI_CHROME_VERSION="136.0.7103.49" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$NOPERM_NOSEED_DIR/last-result" "status=detect_error"
+  assert_file_contains "$NOPERM_NOSEED_DIR/last-result" "reason=missing_required_fields"
+fi
+
+NOPERM_SEED_US_DIR="$TMP_ROOT/runtime/noperm-seed-us"
+mkdir -p "$NOPERM_SEED_US_DIR"
+cp "$FIXTURE_DIR/healthy-no-permanent-country.json" "$NOPERM_SEED_US_DIR/Local State"
+python3 "$SEED_HELPER" write "$NOPERM_SEED_US_DIR/VariationsSeedV2" us us
+if run_case "healthy-no-permanent-country-with-us-seed" env \
+  GEMINI_INSTALL_DIR="$NOPERM_SEED_US_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_SEED_US_DIR/Local State" \
+  GEMINI_CHROME_VERSION="158.0.8127.38" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$NOPERM_SEED_US_DIR/last-result" "status=healthy"
+fi
+
+NOPERM_SEED_BLANK_DIR="$TMP_ROOT/runtime/noperm-seed-countryless"
+mkdir -p "$NOPERM_SEED_BLANK_DIR"
+cp "$FIXTURE_DIR/healthy-no-permanent-country.json" "$NOPERM_SEED_BLANK_DIR/Local State"
+python3 "$SEED_HELPER" write "$NOPERM_SEED_BLANK_DIR/VariationsSeedV2" "" ""
+python3 "$SEED_HELPER" write "$NOPERM_SEED_BLANK_DIR/VariationsSafeSeedV2" "" ""
+if run_case "healthy-no-permanent-country-with-countryless-seed" env \
+  GEMINI_INSTALL_DIR="$NOPERM_SEED_BLANK_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_SEED_BLANK_DIR/Local State" \
+  GEMINI_CHROME_VERSION="158.0.8127.38" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash patch.sh run; then
+  assert_file_contains "$NOPERM_SEED_BLANK_DIR/last-result" "status=healthy"
+fi
+
+NOPERM_SEED_CN_DIR="$TMP_ROOT/runtime/noperm-seed-cn"
+mkdir -p "$NOPERM_SEED_CN_DIR"
+cp "$FIXTURE_DIR/healthy-no-permanent-country.json" "$NOPERM_SEED_CN_DIR/Local State"
+python3 "$SEED_HELPER" write "$NOPERM_SEED_CN_DIR/VariationsSeedV2" cn cn
+printf '#!/usr/bin/env bash\nexit 0\n' > "$NOPERM_SEED_CN_DIR/noop-core-install.sh"
+chmod +x "$NOPERM_SEED_CN_DIR/noop-core-install.sh"
+if run_case "status-drifted-no-permanent-country-with-cn-seed" env \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_SEED_CN_DIR/Local State" \
+  GEMINI_CHROME_VERSION="158.0.8127.38" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh status; then
+  assert_contains "${CASE_OUTPUT}" "Current state: drifted"
+fi
+if run_case "run-patches-no-permanent-country-cn-seed" env \
+  GEMINI_INSTALL_DIR="$NOPERM_SEED_CN_DIR" \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_SEED_CN_DIR/Local State" \
+  GEMINI_CORE_INSTALL_CMD="$NOPERM_SEED_CN_DIR/noop-core-install.sh" \
+  GEMINI_CHROME_VERSION="158.0.8127.38" \
+  GEMINI_CHROME_RUNNING="0" \
+  bash -c "bash patch.sh run && python3 '$SEED_HELPER' read '$NOPERM_SEED_CN_DIR/VariationsSeedV2'"; then
+  assert_file_contains "$NOPERM_SEED_CN_DIR/last-result" "status=healthy"
+  assert_contains "${CASE_OUTPUT}" "us,us"
+  assert_file_missing "$NOPERM_SEED_CN_DIR/pending"
+fi
+
+NOPERM_NOZSTD_DIR="$TMP_ROOT/runtime/noperm-seed-nozstd"
+mkdir -p "$NOPERM_NOZSTD_DIR/bin"
+cp "$FIXTURE_DIR/healthy-no-permanent-country.json" "$NOPERM_NOZSTD_DIR/Local State"
+printf '\x28\xb5\x2f\xfdjunk' > "$NOPERM_NOZSTD_DIR/VariationsSeedV2"
+ln -s "$(command -v python3)" "$NOPERM_NOZSTD_DIR/bin/python3"
+if run_case "status-unknown-no-permanent-country-when-zstd-unavailable" env \
+  PATH="$NOPERM_NOZSTD_DIR/bin:/usr/bin:/bin" \
+  GEMINI_EXTRA_PATH="" \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_NOZSTD_DIR/Local State" \
+  GEMINI_CHROME_VERSION="158.0.8127.38" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh status; then
+  assert_contains "${CASE_OUTPUT}" "Current state: unknown"
+fi
+
+NOPERM_CN_PERM_DIR="$TMP_ROOT/runtime/perm-cn-seed-us"
+mkdir -p "$NOPERM_CN_PERM_DIR"
+cp "$FIXTURE_DIR/drifted-permanent-country.json" "$NOPERM_CN_PERM_DIR/Local State"
+python3 "$SEED_HELPER" write "$NOPERM_CN_PERM_DIR/VariationsSeedV2" us us
+if run_case "status-drifted-permanent-country-cn-with-us-seed" env \
+  GEMINI_LOCAL_STATE_PATH="$NOPERM_CN_PERM_DIR/Local State" \
+  GEMINI_CHROME_VERSION="158.0.8127.38" \
+  GEMINI_CHROME_RUNNING="1" \
+  bash patch.sh status; then
+  assert_contains "${CASE_OUTPUT}" "Current state: drifted"
+fi
+
 WATCHER_RUNTIME_DIR="$TMP_ROOT/runtime/watcher-patches"
 if run_case "watcher-patches-on-chrome-close" bash -c "
   mkdir -p '$WATCHER_RUNTIME_DIR'

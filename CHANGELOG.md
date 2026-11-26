@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Allow missing permanent consistency country when V2 seeds exist([def9a91](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/def9a91da419a66733cf933f74a4403c5720f69e))
+## [0.6.9] - 2026-11-23
+
+### Bug Fixes
+
 - Cache upstream install script for offline fallback([b4b47d4](https://github.com/Adonis0123/gemini-chrome-autoinstall/commit/b4b47d4bce79173f35d77c6760620817e3cd61e2))
 ## [0.6.8] - 2026-11-13
 
